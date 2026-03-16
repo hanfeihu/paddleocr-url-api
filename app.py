@@ -113,6 +113,7 @@ TASK_COMPLETE_PATH = os.getenv("OCR_TASK_COMPLETE_PATH", "/api/ocr/tasks/complet
 TASK_POLL_SECS = float(os.getenv("OCR_TASK_POLL_SECS", "2"))
 TASK_PUBLIC_IP = os.getenv("OCR_TASK_PUBLIC_IP", "").strip() or None
 TASK_MAX_OCR_TEXT_LEN = int(os.getenv("OCR_TASK_MAX_OCR_TEXT_LEN", "8000"))
+TASK_EMPTY_OCR_TEXT = os.getenv("OCR_TASK_EMPTY_OCR_TEXT", "...")
 
 
 class OCRRequest(BaseModel):
@@ -343,10 +344,13 @@ async def _task_complete(
 ) -> None:
     url = f"{TASK_BASE_URL}{TASK_COMPLETE_PATH}"
     if ocr_text is not None:
+        cleaned = _sanitize_ocr_text(ocr_text or "")
+        if not cleaned.strip():
+            cleaned = TASK_EMPTY_OCR_TEXT
         payload = {
             "taskId": int(task_id),
             "ocrText": _truncate(
-                _sanitize_ocr_text(ocr_text or ""),
+                cleaned,
                 max_len=TASK_MAX_OCR_TEXT_LEN,
             ),
         }
