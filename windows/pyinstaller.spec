@@ -23,7 +23,7 @@ hiddenimports += collect_submodules('starlette')
 
 datas = []
 
-spec_dir = os.path.abspath(os.path.dirname(__file__))
+spec_dir = os.path.abspath(os.path.dirname(SPECPATH))
 models_dir = os.path.join(spec_dir, 'models')
 
 # Include offline models.
