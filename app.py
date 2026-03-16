@@ -1,14 +1,17 @@
 import asyncio
 import os
 import logging
+from collections import deque
 from contextlib import asynccontextmanager
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from PIL import Image
 
@@ -16,6 +19,49 @@ from PIL import Image
 APP_NAME = "paddleocr-service"
 
 logger = logging.getLogger(APP_NAME)
+
+# Expose a small UI-friendly log buffer.
+_LOG_BUF: deque = deque(maxlen=int(os.getenv("OCR_LOG_BUFFER", "2000")))
+_LOG_SEQ = 0
+
+
+class _InMemoryLogHandler(logging.Handler):
+    def __init__(self, buf: deque) -> None:
+        super().__init__()
+        self._buf = buf
+
+    def emit(self, record: logging.LogRecord) -> None:
+        global _LOG_SEQ
+        try:
+            msg = self.format(record)
+        except Exception:
+            msg = record.getMessage()
+        _LOG_SEQ += 1
+        self._buf.append(
+            {
+                "n": _LOG_SEQ,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "level": record.levelname,
+                "msg": msg,
+            }
+        )
+
+
+_mem_handler = _InMemoryLogHandler(_LOG_BUF)
+_mem_handler.setFormatter(logging.Formatter("%(message)s"))
+
+# Attach to root logger so we also see library logs.
+_root_logger = logging.getLogger()
+if not any(isinstance(h, _InMemoryLogHandler) for h in _root_logger.handlers):
+    _root_logger.addHandler(_mem_handler)
+
+
+def _truncate(s: str, max_len: int = 500) -> str:
+    s2 = (s or "").strip()
+    if len(s2) <= max_len:
+        return s2
+    return s2[: max_len - 3] + "..."
+
 
 # Request-level limit (keeps sync responses bounded)
 MAX_URLS = int(os.getenv("OCR_MAX_URLS", "50"))
@@ -31,6 +77,16 @@ OCR_WORKERS = int(os.getenv("OCR_WORKERS", "6"))
 
 # Only fallback to the accurate preset on sufficiently large images.
 SIZE_GATE = int(os.getenv("OCR_SIZE_GATE", "1200"))
+
+# Background task consumer (pulls OCR work from your backend)
+TASK_CONSUMER_ENABLED = os.getenv("OCR_TASK_CONSUMER_ENABLED", "0") == "1"
+TASK_BASE_URL = os.getenv("OCR_TASK_BASE_URL", "https://dev.tminos.com/tminos").rstrip(
+    "/"
+)
+TASK_CLAIM_PATH = os.getenv("OCR_TASK_CLAIM_PATH", "/api/ocr/tasks/claim")
+TASK_COMPLETE_PATH = os.getenv("OCR_TASK_COMPLETE_PATH", "/api/ocr/tasks/complete")
+TASK_POLL_SECS = float(os.getenv("OCR_TASK_POLL_SECS", "2"))
+TASK_PUBLIC_IP = os.getenv("OCR_TASK_PUBLIC_IP", "").strip() or None
 
 
 class OCRRequest(BaseModel):
@@ -235,6 +291,140 @@ def ocr_image_bytes(image_bytes: bytes) -> str:
     return fast_text
 
 
+async def _task_claim(app: FastAPI) -> Optional[Dict[str, Any]]:
+    url = f"{TASK_BASE_URL}{TASK_CLAIM_PATH}"
+    payload: Optional[Dict[str, Any]] = None
+    if TASK_PUBLIC_IP:
+        payload = {"publicIp": TASK_PUBLIC_IP}
+
+    if payload is None:
+        r = await app.state.task_http.post(url)
+    else:
+        r = await app.state.task_http.post(url, json=payload)
+    r.raise_for_status()
+    js = r.json()
+    if not js.get("success", False):
+        raise RuntimeError(f"claim failed: {js.get('message') or 'unknown'}")
+    return js.get("data")
+
+
+async def _task_complete(
+    app: FastAPI,
+    task_id: int,
+    *,
+    ocr_text: Optional[str] = None,
+    fail_reason: Optional[str] = None,
+) -> None:
+    url = f"{TASK_BASE_URL}{TASK_COMPLETE_PATH}"
+    if ocr_text is not None:
+        payload = {"taskId": int(task_id), "ocrText": ocr_text}
+    else:
+        payload = {
+            "taskId": int(task_id),
+            "failReason": _truncate(fail_reason or "ocr failed"),
+        }
+
+    r = await app.state.task_http.post(url, json=payload)
+    r.raise_for_status()
+    js = r.json()
+    if not js.get("success", False):
+        raise RuntimeError(f"complete failed: {js.get('message') or 'unknown'}")
+
+
+async def _task_complete_with_retry(
+    app: FastAPI,
+    task_id: int,
+    *,
+    ocr_text: Optional[str] = None,
+    fail_reason: Optional[str] = None,
+) -> None:
+    delay = 2.0
+    while True:
+        try:
+            await _task_complete(
+                app, task_id, ocr_text=ocr_text, fail_reason=fail_reason
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("task complete retry taskId=%s err=%s", task_id, e)
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 30.0)
+
+
+async def _task_consumer_loop(app: FastAPI) -> None:
+    logger.info(
+        "task consumer enabled base=%s poll=%.2fs",
+        TASK_BASE_URL,
+        TASK_POLL_SECS,
+    )
+    loop = asyncio.get_running_loop()
+
+    while True:
+        if app.state.consumer_state.get("paused"):
+            app.state.consumer_state["idle"] = True
+            app.state.consumer_state["currentTask"] = None
+            await asyncio.sleep(TASK_POLL_SECS)
+            continue
+
+        task: Optional[Dict[str, Any]] = None
+        try:
+            task = await _task_claim(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("task claim failed err=%s", e)
+            app.state.consumer_state["idle"] = True
+            app.state.consumer_state["currentTask"] = None
+            await asyncio.sleep(TASK_POLL_SECS)
+            continue
+
+        if not task:
+            app.state.consumer_state["idle"] = True
+            app.state.consumer_state["currentTask"] = None
+            await asyncio.sleep(TASK_POLL_SECS)
+            continue
+
+        task_id = task.get("id")
+        image_url = task.get("imageUrl")
+        spu_id = task.get("spuId")
+        image_type = task.get("imageType")
+
+        if not task_id or not image_url:
+            logger.error("invalid task payload: %s", task)
+            await asyncio.sleep(0)
+            continue
+
+        app.state.consumer_state["idle"] = False
+        app.state.consumer_state["currentTask"] = {
+            "id": int(task_id),
+            "spuId": spu_id,
+            "imageType": image_type,
+            "imageUrl": str(image_url),
+            "startedAt": datetime.now(timezone.utc).isoformat(),
+        }
+
+        logger.info(
+            "claimed taskId=%s spuId=%s imageType=%s", task_id, spu_id, image_type
+        )
+        try:
+            data = await _download(str(image_url))
+            app.state.metrics["imagesTotal"] += 1
+            text = await loop.run_in_executor(app.state.executor, ocr_image_bytes, data)
+            await _task_complete_with_retry(app, int(task_id), ocr_text=text or "")
+            app.state.consumer_state["stats"]["completed"] += 1
+            app.state.metrics["imagesOk"] += 1
+            logger.info("completed taskId=%s text_len=%s", task_id, len(text or ""))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            app.state.consumer_state["stats"]["failed"] += 1
+            app.state.metrics["imagesFail"] += 1
+            logger.exception("task failed taskId=%s err=%s", task_id, e)
+            await _task_complete_with_retry(app, int(task_id), fail_reason=str(e))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     timeout = httpx.Timeout(
@@ -248,6 +438,11 @@ async def lifespan(app: FastAPI):
         follow_redirects=True,
         headers={"User-Agent": "paddleocr-url-api/1.0"},
     )
+    app.state.task_http = httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        headers={"User-Agent": "paddleocr-task-consumer/1.0"},
+    )
     app.state.download_sem = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
     app.state.executor = ProcessPoolExecutor(
         max_workers=OCR_WORKERS, initializer=_init_ocr_models
@@ -258,10 +453,36 @@ async def lifespan(app: FastAPI):
         await loop.run_in_executor(app.state.executor, _init_ocr_models)
     except Exception:
         logger.exception("failed to prewarm ocr workers")
+
+    app.state.started_at = datetime.now(timezone.utc)
+    app.state.metrics = {
+        "imagesTotal": 0,
+        "imagesOk": 0,
+        "imagesFail": 0,
+    }
+    app.state.consumer_state = {
+        "enabled": TASK_CONSUMER_ENABLED,
+        "paused": False,
+        "idle": True,
+        "currentTask": None,
+        "stats": {"completed": 0, "failed": 0},
+    }
+    app.state.consumer_task = None
+    if TASK_CONSUMER_ENABLED:
+        app.state.consumer_task = asyncio.create_task(_task_consumer_loop(app))
     try:
         yield
     finally:
+        consumer_task = getattr(app.state, "consumer_task", None)
+        if consumer_task is not None:
+            consumer_task.cancel()
+            try:
+                await consumer_task
+            except Exception:
+                pass
+
         await app.state.http.aclose()
+        await app.state.task_http.aclose()
         app.state.executor.shutdown(wait=True, cancel_futures=True)
 
 
@@ -271,6 +492,266 @@ app = FastAPI(title=APP_NAME, lifespan=lifespan)
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"ok": True, "name": APP_NAME}
+
+
+@app.get("/api/state")
+def api_state() -> JSONResponse:
+    started_at: datetime = app.state.started_at
+    uptime = (datetime.now(timezone.utc) - started_at).total_seconds()
+    return JSONResponse(
+        {
+            "startedAt": started_at.isoformat(),
+            "uptimeSeconds": int(uptime),
+            "metrics": app.state.metrics,
+            "consumer": app.state.consumer_state,
+            "config": {
+                "taskBaseUrl": TASK_BASE_URL,
+                "taskPollSecs": TASK_POLL_SECS,
+            },
+        }
+    )
+
+
+@app.get("/api/logs")
+def api_logs(since: int = 0) -> JSONResponse:
+    items = [it for it in list(_LOG_BUF) if int(it.get("n", 0)) > since]
+    return JSONResponse({"items": items})
+
+
+@app.post("/api/consumer/pause")
+async def consumer_pause() -> JSONResponse:
+    app.state.consumer_state["paused"] = True
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/consumer/resume")
+async def consumer_resume() -> JSONResponse:
+    app.state.consumer_state["paused"] = False
+    return JSONResponse({"ok": True})
+
+
+@app.get("/ui", response_class=HTMLResponse)
+def ui() -> str:
+    return """<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>OCR Worker</title>
+  <style>
+    :root {
+      --bg0:#070A12;
+      --bg1:#0B1120;
+      --panel:rgba(15, 23, 42, .78);
+      --panel2:rgba(2, 6, 23, .55);
+      --stroke:rgba(148, 163, 184, .18);
+      --text:#E7EEF9;
+      --muted:#9FB3D7;
+      --good:#2DD4BF;
+      --warn:#FBBF24;
+      --bad:#FB7185;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;
+      --serif: Georgia, \"Iowan Old Style\", \"Palatino Linotype\", Palatino, serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin:0;
+      color:var(--text);
+      background:
+        radial-gradient(1200px 600px at 15% 10%, rgba(56,189,248,.14), transparent 55%),
+        radial-gradient(900px 500px at 85% 15%, rgba(45,212,191,.10), transparent 60%),
+        radial-gradient(900px 700px at 40% 110%, rgba(251,191,36,.10), transparent 55%),
+        linear-gradient(180deg, var(--bg0), var(--bg1));
+      font: 14px/1.45 system-ui, -apple-system, Segoe UI, Helvetica, Arial;
+    }
+    header {
+      padding: 18px 18px 14px;
+      border-bottom:1px solid var(--stroke);
+      display:flex;
+      align-items:flex-end;
+      justify-content:space-between;
+      gap:12px;
+    }
+    header h1 {
+      margin:0;
+      font: 700 18px/1.15 var(--serif);
+      letter-spacing:.2px;
+    }
+    header .sub {
+      color:var(--muted);
+      font-size:12px;
+      margin-top:6px;
+    }
+    .pill {
+      font-size:12px;
+      color:var(--muted);
+      padding:6px 10px;
+      border:1px solid var(--stroke);
+      border-radius:999px;
+      background:rgba(2,6,23,.35);
+      backdrop-filter: blur(10px);
+      white-space:nowrap;
+    }
+    main {
+      display:grid;
+      grid-template-columns: 1fr 1.4fr;
+      gap: 14px;
+      padding: 14px;
+    }
+    .card {
+      border:1px solid var(--stroke);
+      border-radius: 14px;
+      background: var(--panel);
+      box-shadow: 0 18px 60px rgba(0,0,0,.35);
+      overflow:hidden;
+    }
+    .card .hd {
+      padding: 12px 12px 10px;
+      border-bottom:1px solid rgba(148,163,184,.14);
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+    }
+    .card .hd .t {
+      color: var(--muted);
+      font-size:12px;
+      letter-spacing:.2px;
+      text-transform: uppercase;
+    }
+    .card .bd { padding: 12px; }
+    .grid { display:grid; grid-template-columns: 150px 1fr; gap:10px; }
+    .row { padding: 8px 0; border-bottom:1px dashed rgba(148,163,184,.16); }
+    .row:last-child { border-bottom:none; }
+    .k { color: var(--muted); font-size: 12px; }
+    .v { font-family: var(--mono); word-break: break-all; white-space: pre-wrap; }
+    .btns { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+    button {
+      appearance:none;
+      border:1px solid var(--stroke);
+      background: rgba(2,6,23,.55);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor:pointer;
+    }
+    button:hover { border-color: rgba(148,163,184,.35); }
+    button:active { transform: translateY(1px); }
+    .good { color: var(--good); }
+    .bad { color: var(--bad); }
+    .warn { color: var(--warn); }
+    pre {
+      margin:0;
+      padding: 12px;
+      height: 70vh;
+      overflow:auto;
+      background: var(--panel2);
+      border:1px solid rgba(148,163,184,.16);
+      border-radius: 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+    @media (max-width: 980px) { main { grid-template-columns: 1fr; } pre { height: 52vh; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>OCR Worker</h1>
+      <div class=\"sub\">Auto-claim tasks, run OCR, auto-complete + live logs</div>
+    </div>
+    <div class=\"pill\" id=\"status\">connecting...</div>
+  </header>
+
+  <main>
+    <section class=\"card\">
+      <div class=\"hd\">
+        <div class=\"t\">Runtime</div>
+        <div class=\"btns\">
+          <button id=\"pauseBtn\">Pause</button>
+          <button id=\"resumeBtn\">Resume</button>
+          <a class=\"pill\" href=\"/docs\" target=\"_blank\" style=\"text-decoration:none\">OpenAPI</a>
+        </div>
+      </div>
+      <div class=\"bd\">
+        <div class=\"grid\">
+          <div class=\"row\"><div class=\"k\">Uptime</div><div class=\"v\" id=\"uptime\">-</div></div>
+          <div class=\"row\"><div class=\"k\">Images Total</div><div class=\"v\" id=\"imgTotal\">0</div></div>
+          <div class=\"row\"><div class=\"k\">Images OK</div><div class=\"v good\" id=\"imgOk\">0</div></div>
+          <div class=\"row\"><div class=\"k\">Images Fail</div><div class=\"v bad\" id=\"imgFail\">0</div></div>
+          <div class=\"row\"><div class=\"k\">Consumer</div><div class=\"v\" id=\"consumer\">-</div></div>
+          <div class=\"row\"><div class=\"k\">Current Task</div><div class=\"v\" id=\"task\">-</div></div>
+          <div class=\"row\"><div class=\"k\">Backend</div><div class=\"v\" id=\"backend\">-</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class=\"card\">
+      <div class=\"hd\"><div class=\"t\">Logs</div><div class=\"pill\">auto-scroll</div></div>
+      <div class=\"bd\"><pre id=\"log\">Loading...</pre></div>
+    </section>
+  </main>
+
+  <script>
+    let last = 0;
+    function fmtSec(s){
+      const h = Math.floor(s/3600);
+      const m = Math.floor((s%3600)/60);
+      const ss = Math.floor(s%60);
+      return `${h}h ${m}m ${ss}s`;
+    }
+    function fmtTask(t){
+      if(!t) return '-';
+      const head = `id=${t.id} spuId=${t.spuId ?? ''} type=${t.imageType ?? ''}`.trim();
+      return head + "\n" + (t.imageUrl || '');
+    }
+    async function post(path){
+      const r = await fetch(path, {method:'POST'});
+      if(!r.ok) throw new Error('http ' + r.status);
+    }
+    document.getElementById('pauseBtn').onclick = () => post('/api/consumer/pause');
+    document.getElementById('resumeBtn').onclick = () => post('/api/consumer/resume');
+
+    async function tick(){
+      try{
+        const s = await fetch('/api/state').then(r=>r.json());
+        document.getElementById('uptime').textContent = fmtSec(s.uptimeSeconds || 0);
+        document.getElementById('imgTotal').textContent = s.metrics.imagesTotal;
+        document.getElementById('imgOk').textContent = s.metrics.imagesOk;
+        document.getElementById('imgFail').textContent = s.metrics.imagesFail;
+
+        const c = s.consumer;
+        const mode = c.enabled ? (c.paused ? 'paused' : (c.idle ? 'idle' : 'working')) : 'api-only';
+        document.getElementById('consumer').textContent = mode;
+        document.getElementById('task').textContent = fmtTask(c.currentTask);
+        document.getElementById('backend').textContent = s.config.taskBaseUrl + ` (poll ${s.config.taskPollSecs}s)`;
+
+        const status = document.getElementById('status');
+        status.textContent = mode;
+        status.className = 'pill ' + (mode==='working' ? 'good' : (mode==='paused' ? 'warn' : ''));
+
+        const logs = await fetch('/api/logs?since=' + last).then(r=>r.json());
+        if(logs.items && logs.items.length){
+          const pre = document.getElementById('log');
+          if(last === 0) pre.textContent = '';
+          for(const it of logs.items){
+            pre.textContent += `[${it.ts}] ${it.level} ${it.msg}\n`;
+            last = it.n;
+          }
+          pre.scrollTop = pre.scrollHeight;
+        }
+      }catch(e){
+        document.getElementById('status').textContent = 'error';
+      }
+    }
+    setInterval(tick, 1000);
+    tick();
+  </script>
+</body>
+</html>"""
 
 
 async def _download(url: str) -> bytes:
@@ -320,23 +801,29 @@ async def ocr(req: OCRRequest) -> OCRResponse:
     async def handle_one(i: int, url: str) -> None:
         try:
             data = await _download(url)
+            app.state.metrics["imagesTotal"] += 1
         except ValueError:
             results[i] = OCRResult(url=url, error="invalid_url")
+            app.state.metrics["imagesFail"] += 1
             return
         except RuntimeError as e:
             results[i] = OCRResult(url=url, error=str(e))
+            app.state.metrics["imagesFail"] += 1
             return
         except Exception:
             results[i] = OCRResult(url=url, error="download_failed")
+            app.state.metrics["imagesFail"] += 1
             return
 
         try:
             text = await loop.run_in_executor(app.state.executor, ocr_image_bytes, data)
             # "no text" is a success case (empty string)
             results[i] = OCRResult(url=url, text=text or "")
+            app.state.metrics["imagesOk"] += 1
         except Exception:
             logger.exception("ocr_failed url=%s", url)
             results[i] = OCRResult(url=url, error="ocr_failed")
+            app.state.metrics["imagesFail"] += 1
 
     await asyncio.gather(*[handle_one(i, u) for i, u in enumerate(req.urls)])
     return OCRResponse(
