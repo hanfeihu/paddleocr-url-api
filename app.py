@@ -753,41 +753,42 @@ def ui() -> str:
   </style>
 </head>
 <body>
-  <header>
+	  <header>
     <div>
       <h1>OCR Worker</h1>
       <div class=\"sub\">Auto-claim tasks, run OCR, auto-complete + live logs</div>
     </div>
-    <div class=\"pill\" id=\"status\">connecting...</div>
-  </header>
+	    <div class=\"pill\" id=\"status\">连接中...</div>
+	  </header>
 
   <main>
     <section class=\"card\">
-      <div class=\"hd\">
-        <div class=\"t\">Runtime</div>
-        <div class=\"btns\">
-          <button id=\"pauseBtn\">Pause</button>
-          <button id=\"resumeBtn\">Resume</button>
-          <a class=\"pill\" href=\"/docs\" target=\"_blank\" style=\"text-decoration:none\">OpenAPI</a>
-        </div>
-      </div>
+	      <div class=\"hd\">
+	        <div class=\"t\">运行状态</div>
+	        <div class=\"btns\">
+	          <button id=\"pauseBtn\">暂停</button>
+	          <button id=\"resumeBtn\">继续</button>
+	          <a class=\"pill\" href=\"/docs\" target=\"_blank\" style=\"text-decoration:none\">接口文档</a>
+	        </div>
+	      </div>
       <div class=\"bd\">
         <div class=\"grid\">
-          <div class=\"row\"><div class=\"k\">Uptime</div><div class=\"v\" id=\"uptime\">-</div></div>
-          <div class=\"row\"><div class=\"k\">Images Total</div><div class=\"v\" id=\"imgTotal\">0</div></div>
-          <div class=\"row\"><div class=\"k\">Images OK</div><div class=\"v good\" id=\"imgOk\">0</div></div>
-          <div class=\"row\"><div class=\"k\">Images Fail</div><div class=\"v bad\" id=\"imgFail\">0</div></div>
-          <div class=\"row\"><div class=\"k\">Consumer</div><div class=\"v\" id=\"consumer\">-</div></div>
-          <div class=\"row\"><div class=\"k\">Current Task</div><div class=\"v\" id=\"task\">-</div></div>
-          <div class=\"row\"><div class=\"k\">Backend</div><div class=\"v\" id=\"backend\">-</div></div>
-        </div>
-      </div>
-    </section>
+	          <div class=\"row\"><div class=\"k\">运行时长</div><div class=\"v\" id=\"uptime\">-</div></div>
+	          <div class=\"row\"><div class=\"k\">处理总数</div><div class=\"v\" id=\"imgTotal\">0</div></div>
+	          <div class=\"row\"><div class=\"k\">成功</div><div class=\"v good\" id=\"imgOk\">0</div></div>
+	          <div class=\"row\"><div class=\"k\">失败</div><div class=\"v bad\" id=\"imgFail\">0</div></div>
+	          <div class=\"row\"><div class=\"k\">消费状态</div><div class=\"v\" id=\"consumer\">-</div></div>
+	          <div class=\"row\"><div class=\"k\">当前任务</div><div class=\"v\" id=\"task\">-</div></div>
+	          <div class=\"row\"><div class=\"k\">后端服务</div><div class=\"v\" id=\"backend\">-</div></div>
+	          <div class=\"row\"><div class=\"k\">网络状态</div><div class=\"v\" id=\"net\">-</div></div>
+	        </div>
+	      </div>
+	    </section>
 
-    <section class=\"card\">
-      <div class=\"hd\"><div class=\"t\">Logs</div><div class=\"pill\">auto-scroll</div></div>
-      <div class=\"bd\"><pre id=\"log\">Loading...</pre></div>
-    </section>
+	    <section class=\"card\">
+	      <div class=\"hd\"><div class=\"t\">日志</div><div class=\"pill\">自动滚动</div></div>
+	      <div class=\"bd\"><pre id=\"log\">Loading...</pre></div>
+	    </section>
   </main>
 
   <script>
@@ -803,10 +804,10 @@ def ui() -> str:
       const head = `id=${t.id} spuId=${t.spuId ?? ''} type=${t.imageType ?? ''}`.trim();
       return head + "\\n" + (t.imageUrl || '');
     }
-    async function post(path){
-      const r = await fetch(path, {method:'POST'});
-      if(!r.ok) throw new Error('http ' + r.status);
-    }
+	    async function post(path){
+	      const r = await fetch(path, {method:'POST'});
+	      if(!r.ok) throw new Error('http ' + r.status);
+	    }
     document.getElementById('pauseBtn').onclick = () => post('/api/consumer/pause');
     document.getElementById('resumeBtn').onclick = () => post('/api/consumer/resume');
 
@@ -818,15 +819,18 @@ def ui() -> str:
         document.getElementById('imgOk').textContent = s.metrics.imagesOk;
         document.getElementById('imgFail').textContent = s.metrics.imagesFail;
 
-        const c = s.consumer;
-        const mode = c.enabled ? (c.paused ? 'paused' : (c.idle ? 'idle' : 'working')) : 'api-only';
-        document.getElementById('consumer').textContent = mode;
-        document.getElementById('task').textContent = fmtTask(c.currentTask);
-        document.getElementById('backend').textContent = s.config.taskBaseUrl + ` (poll ${s.config.taskPollSecs}s)`;
+	        const c = s.consumer;
+	        const backendOk = (c.backendOk === undefined) ? true : !!c.backendOk;
+	        const modeRaw = c.enabled ? (c.paused ? 'paused' : (c.idle ? 'idle' : 'working')) : 'api-only';
+	        const modeCn = (modeRaw==='api-only') ? '仅接口模式' : (modeRaw==='paused' ? '已暂停' : (modeRaw==='working' ? '执行中' : '空闲'));
+	        document.getElementById('consumer').textContent = modeCn;
+	        document.getElementById('task').textContent = fmtTask(c.currentTask);
+	        document.getElementById('backend').textContent = s.config.taskBaseUrl + ` (轮询 ${s.config.taskPollSecs}s)`;
+	        document.getElementById('net').textContent = backendOk ? '正常' : ('网络异常: ' + (c.lastBackendError || ''));
 
-        const status = document.getElementById('status');
-        status.textContent = mode;
-        status.className = 'pill ' + (mode==='working' ? 'good' : (mode==='paused' ? 'warn' : ''));
+	        const status = document.getElementById('status');
+	        status.textContent = backendOk ? modeCn : '网络异常';
+	        status.className = 'pill ' + (!backendOk ? 'bad' : (modeRaw==='working' ? 'good' : (modeRaw==='paused' ? 'warn' : '')));
 
         const logs = await fetch('/api/logs?since=' + last).then(r=>r.json());
         if(logs.items && logs.items.length){
