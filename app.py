@@ -63,6 +63,33 @@ def _truncate(s: str, max_len: int = 500) -> str:
     return s2[: max_len - 3] + "..."
 
 
+def _sanitize_ocr_text(s: str) -> str:
+    """Sanitize OCR text for backend storage.
+
+    Some backends/DBs choke on control characters or non-BMP Unicode (4-byte UTF-8).
+    We keep: BMP chars, tab/newline, and normal printable chars.
+    """
+
+    if not s:
+        return ""
+
+    out: List[str] = []
+    for ch in s:
+        o = ord(ch)
+        # drop non-BMP (e.g. emoji, rare ideographs) to avoid DB utf8 (non-utf8mb4) issues
+        if o > 0xFFFF:
+            continue
+        # keep common whitespace
+        if ch in ("\n", "\t"):
+            out.append(ch)
+            continue
+        # drop other control chars
+        if o < 32 or o == 127:
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 # Request-level limit (keeps sync responses bounded)
 MAX_URLS = int(os.getenv("OCR_MAX_URLS", "50"))
 
@@ -318,7 +345,10 @@ async def _task_complete(
     if ocr_text is not None:
         payload = {
             "taskId": int(task_id),
-            "ocrText": _truncate(ocr_text or "", max_len=TASK_MAX_OCR_TEXT_LEN),
+            "ocrText": _truncate(
+                _sanitize_ocr_text(ocr_text or ""),
+                max_len=TASK_MAX_OCR_TEXT_LEN,
+            ),
         }
     else:
         payload = {
@@ -327,7 +357,18 @@ async def _task_complete(
         }
 
     r = await app.state.task_http.post(url, json=payload)
-    r.raise_for_status()
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        body = ""
+        try:
+            body = r.text
+        except Exception:
+            body = ""
+        raise RuntimeError(
+            f"complete http {r.status_code}: {_truncate(body, 800)}"
+        ) from e
+
     js = r.json()
     if not js.get("success", False):
         raise RuntimeError(f"complete failed: {js.get('message') or 'unknown'}")
