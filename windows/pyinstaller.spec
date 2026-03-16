@@ -23,8 +23,19 @@ hiddenimports += collect_submodules('starlette')
 
 datas = []
 
-spec_dir = os.path.abspath(os.path.dirname(SPECPATH))
-models_dir = os.path.join(spec_dir, 'models')
+# PyInstaller may set SPECPATH to a relative path or just the basename.
+spec_dir = os.path.abspath(os.path.dirname(SPECPATH) or os.getcwd())
+
+# Find repository root (this spec lives under <root>/windows/pyinstaller.spec).
+if os.path.isdir(os.path.join(spec_dir, 'windows')) and os.path.isfile(os.path.join(spec_dir, 'windows', 'main.py')):
+    repo_root = spec_dir
+elif os.path.basename(spec_dir).lower() == 'windows' and os.path.isfile(os.path.join(spec_dir, 'main.py')):
+    repo_root = os.path.abspath(os.path.join(spec_dir, os.pardir))
+else:
+    repo_root = spec_dir
+
+windows_dir = os.path.join(repo_root, 'windows')
+models_dir = os.path.join(windows_dir, 'models')
 
 # Include offline models.
 # Layout: windows/models/official_models/...
@@ -35,8 +46,8 @@ else:
 
 
 a = Analysis(
-    [os.path.join(spec_dir, 'main.py')],
-    pathex=[spec_dir],
+    [os.path.join(windows_dir, 'main.py')],
+    pathex=[repo_root, windows_dir],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
