@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.paddleocr.urlapi</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/local/paddleocr-url-api/run_server.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/usr/local/paddleocr-url-api</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/paddleocr-url-api.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/paddleocr-url-api.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>OCR_WORKERS</key>
+      <string>6</string>
+      <key>OMP_NUM_THREADS</key>
+      <string>1</string>
+      <key>OCR_DOWNLOAD_CONCURRENCY</key>
+      <string>16</string>
+      <key>OCR_MAX_URLS</key>
+      <string>50</string>
+      <key>OCR_SIZE_GATE</key>
+      <string>1200</string>
+      <key>PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK</key>
+      <string>True</string>
+    </dict>
+  </dict>
+</plist>

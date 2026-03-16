@@ -1,0 +1,23 @@
+<service>
+  <id>ocr-url-api</id>
+  <name>OCR URL API</name>
+  <description>PaddleOCR URL batch OCR service</description>
+
+  <executable>%BASE%\ocr-url-api.exe</executable>
+
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+
+  <env name="OCR_PORT" value="8000" />
+  <env name="OCR_WORKERS" value="6" />
+  <env name="OMP_NUM_THREADS" value="1" />
+  <env name="OCR_DOWNLOAD_CONCURRENCY" value="16" />
+  <env name="OCR_MAX_URLS" value="50" />
+  <env name="OCR_SIZE_GATE" value="1200" />
+  <env name="PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK" value="True" />
+  <env name="PADDLE_PDX_CACHE_HOME" value="%BASE%\models" />
+
+  <onfailure action="restart" delay="10 sec" />
+</service>

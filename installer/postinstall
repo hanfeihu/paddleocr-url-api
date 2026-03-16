@@ -1,0 +1,34 @@
+#!/bin/bash
+set -euo pipefail
+
+INSTALL_DIR="/usr/local/paddleocr-url-api"
+
+# Prefer Homebrew Python 3.11 if available (more likely to have matching wheels).
+if [ -x "/opt/homebrew/bin/python3.11" ]; then
+  PY="/opt/homebrew/bin/python3.11"
+else
+  PY="/usr/bin/python3"
+fi
+
+if [ ! -x "$PY" ]; then
+  echo "python not found at $PY" 1>&2
+  exit 1
+fi
+
+# Create venv under install dir
+if [ ! -d "$INSTALL_DIR/.venv" ]; then
+  "$PY" -m venv "$INSTALL_DIR/.venv"
+fi
+
+source "$INSTALL_DIR/.venv/bin/activate"
+python -m pip install -U pip
+
+# Install dependencies
+pip install -r "$INSTALL_DIR/requirements.txt"
+
+# Enable daemon
+launchctl unload /Library/LaunchDaemons/com.paddleocr.urlapi.plist >/dev/null 2>&1 || true
+launchctl load /Library/LaunchDaemons/com.paddleocr.urlapi.plist
+launchctl start com.paddleocr.urlapi || true
+
+exit 0
