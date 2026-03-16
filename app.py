@@ -85,6 +85,7 @@ TASK_CLAIM_PATH = os.getenv("OCR_TASK_CLAIM_PATH", "/api/ocr/tasks/claim")
 TASK_COMPLETE_PATH = os.getenv("OCR_TASK_COMPLETE_PATH", "/api/ocr/tasks/complete")
 TASK_POLL_SECS = float(os.getenv("OCR_TASK_POLL_SECS", "2"))
 TASK_PUBLIC_IP = os.getenv("OCR_TASK_PUBLIC_IP", "").strip() or None
+TASK_MAX_OCR_TEXT_LEN = int(os.getenv("OCR_TASK_MAX_OCR_TEXT_LEN", "8000"))
 
 
 class OCRRequest(BaseModel):
@@ -315,7 +316,10 @@ async def _task_complete(
 ) -> None:
     url = f"{TASK_BASE_URL}{TASK_COMPLETE_PATH}"
     if ocr_text is not None:
-        payload = {"taskId": int(task_id), "ocrText": ocr_text}
+        payload = {
+            "taskId": int(task_id),
+            "ocrText": _truncate(ocr_text or "", max_len=TASK_MAX_OCR_TEXT_LEN),
+        }
     else:
         payload = {
             "taskId": int(task_id),
@@ -414,6 +418,8 @@ async def _task_consumer_loop(app: FastAPI) -> None:
             app.state.consumer_state["stats"]["completed"] += 1
             app.state.metrics["imagesOk"] += 1
             logger.info("completed taskId=%s text_len=%s", task_id, len(text or ""))
+            app.state.consumer_state["idle"] = True
+            app.state.consumer_state["currentTask"] = None
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -421,6 +427,8 @@ async def _task_consumer_loop(app: FastAPI) -> None:
             app.state.metrics["imagesFail"] += 1
             logger.exception("task failed taskId=%s err=%s", task_id, e)
             await _task_complete_with_retry(app, int(task_id), fail_reason=str(e))
+            app.state.consumer_state["idle"] = True
+            app.state.consumer_state["currentTask"] = None
 
 
 @asynccontextmanager
