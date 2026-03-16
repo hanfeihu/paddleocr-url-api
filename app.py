@@ -712,7 +712,7 @@ def ui() -> str:
     function fmtTask(t){
       if(!t) return '-';
       const head = `id=${t.id} spuId=${t.spuId ?? ''} type=${t.imageType ?? ''}`.trim();
-      return head + "\n" + (t.imageUrl || '');
+      return head + "\\n" + (t.imageUrl || '');
     }
     async function post(path){
       const r = await fetch(path, {method:'POST'});
@@ -744,7 +744,7 @@ def ui() -> str:
           const pre = document.getElementById('log');
           if(last === 0) pre.textContent = '';
           for(const it of logs.items){
-            pre.textContent += `[${it.ts}] ${it.level} ${it.msg}\n`;
+            pre.textContent += `[${it.ts}] ${it.level} ${it.msg}\\n`;
             last = it.n;
           }
           pre.scrollTop = pre.scrollHeight;
