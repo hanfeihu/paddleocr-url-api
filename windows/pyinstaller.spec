@@ -23,17 +23,20 @@ hiddenimports += collect_submodules('starlette')
 
 datas = []
 
+spec_dir = os.path.abspath(os.path.dirname(__file__))
+models_dir = os.path.join(spec_dir, 'models')
+
 # Include offline models.
 # Layout: windows/models/official_models/...
-if os.path.isdir(os.path.join('windows', 'models', 'official_models')):
-    datas.append((os.path.join('windows', 'models'), 'models'))
+if os.path.isdir(os.path.join(models_dir, 'official_models')):
+    datas.append((models_dir, 'models'))
 else:
     raise SystemExit('Missing offline models at windows/models/official_models')
 
 
 a = Analysis(
-    ['main.py'],
-    pathex=['.'],
+    [os.path.join(spec_dir, 'main.py')],
+    pathex=[spec_dir],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
