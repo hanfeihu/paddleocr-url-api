@@ -80,9 +80,7 @@ SIZE_GATE = int(os.getenv("OCR_SIZE_GATE", "1200"))
 
 # Background task consumer (pulls OCR work from your backend)
 TASK_CONSUMER_ENABLED = os.getenv("OCR_TASK_CONSUMER_ENABLED", "0") == "1"
-TASK_BASE_URL = os.getenv("OCR_TASK_BASE_URL", "https://dev.tminos.com/tminos").rstrip(
-    "/"
-)
+TASK_BASE_URL = os.getenv("OCR_TASK_BASE_URL", "https://dev.tminos.com").rstrip("/")
 TASK_CLAIM_PATH = os.getenv("OCR_TASK_CLAIM_PATH", "/api/ocr/tasks/claim")
 TASK_COMPLETE_PATH = os.getenv("OCR_TASK_COMPLETE_PATH", "/api/ocr/tasks/complete")
 TASK_POLL_SECS = float(os.getenv("OCR_TASK_POLL_SECS", "2"))
