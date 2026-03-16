@@ -60,3 +60,7 @@ Test
   curl -s http://127.0.0.1:8000/ocr \
     -H 'content-type: application/json' \
     -d '{"urls":["https://img.kwcdn.com/product/open/dad15c72918141d0aedcc65ea45832fa-goods.jpeg"]}'
+
+Uninstall
+- English: `UNINSTALL.md`
+- 中文: `UNINSTALL.zh-CN.md`
