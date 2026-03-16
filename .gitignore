@@ -5,7 +5,13 @@ __pycache__/
 .venv/
 
 dist/
-offline/
+# Keep offline build scripts in git; ignore heavy payload artifacts.
+offline/payload/
+offline/python/
+offline/wheels/
+offline/models/
+offline/dist/
+offline/.offline_pkgbuild/
 .pkgbuild/
 
 *.pkg

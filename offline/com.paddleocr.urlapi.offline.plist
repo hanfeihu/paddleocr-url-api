@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.paddleocr.urlapi.offline</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/local/paddleocr-url-api-offline/run_server.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/usr/local/paddleocr-url-api-offline</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/paddleocr-url-api.offline.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/paddleocr-url-api.offline.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>OCR_WORKERS</key>
+      <string>6</string>
+      <key>OMP_NUM_THREADS</key>
+      <string>1</string>
+      <key>OCR_DOWNLOAD_CONCURRENCY</key>
+      <string>16</string>
+      <key>OCR_MAX_URLS</key>
+      <string>50</string>
+      <key>OCR_SIZE_GATE</key>
+      <string>1200</string>
+      <key>PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK</key>
+      <string>True</string>
+
+      <key>OCR_TASK_CONSUMER_ENABLED</key>
+      <string>1</string>
+      <key>OCR_TASK_BASE_URL</key>
+      <string>https://dev.tminos.com</string>
+      <key>OCR_TASK_POLL_SECS</key>
+      <string>2</string>
+
+      <!-- Force PaddleX cache to live inside install dir (offline models included) -->
+      <key>PADDLE_PDX_CACHE_HOME</key>
+      <string>/usr/local/paddleocr-url-api-offline/models</string>
+    </dict>
+  </dict>
+</plist>
