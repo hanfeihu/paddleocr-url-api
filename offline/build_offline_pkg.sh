@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 IDENTIFIER="com.paddleocr.urlapi.offline"
-VERSION="1.0.4"
+VERSION="1.0.5"
 INSTALL_DIR="/usr/local/paddleocr-url-api-offline"
 
 DIST_DIR="$ROOT_DIR/dist"

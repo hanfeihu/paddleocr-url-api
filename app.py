@@ -114,6 +114,34 @@ TASK_POLL_SECS = float(os.getenv("OCR_TASK_POLL_SECS", "2"))
 TASK_PUBLIC_IP = os.getenv("OCR_TASK_PUBLIC_IP", "").strip() or None
 TASK_MAX_OCR_TEXT_LEN = int(os.getenv("OCR_TASK_MAX_OCR_TEXT_LEN", "8000"))
 TASK_EMPTY_OCR_TEXT = os.getenv("OCR_TASK_EMPTY_OCR_TEXT", "...")
+TASK_NETWORK_SLEEP_SECS = float(os.getenv("OCR_TASK_NETWORK_SLEEP_SECS", "5"))
+
+
+def _is_backend_network_error(e: BaseException) -> bool:
+    return isinstance(e, (httpx.TimeoutException, httpx.RequestError))
+
+
+async def _wait_backend(app: FastAPI) -> None:
+    """Sleep-loop until backend host is reachable."""
+
+    while True:
+        try:
+            r = await app.state.task_http.get(TASK_BASE_URL)
+            _ = r.status_code
+            app.state.consumer_state["backendOk"] = True
+            app.state.consumer_state["lastBackendError"] = None
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            app.state.consumer_state["backendOk"] = False
+            app.state.consumer_state["lastBackendError"] = _truncate(str(e), 300)
+            logger.warning(
+                "backend unreachable (%s); sleep %.0fs",
+                type(e).__name__,
+                TASK_NETWORK_SLEEP_SECS,
+            )
+            await asyncio.sleep(TASK_NETWORK_SLEEP_SECS)
 
 
 class OCRRequest(BaseModel):
@@ -319,6 +347,7 @@ def ocr_image_bytes(image_bytes: bytes) -> str:
 
 
 async def _task_claim(app: FastAPI) -> Optional[Dict[str, Any]]:
+    await _wait_backend(app)
     url = f"{TASK_BASE_URL}{TASK_CLAIM_PATH}"
     payload: Optional[Dict[str, Any]] = None
     if TASK_PUBLIC_IP:
@@ -343,6 +372,7 @@ async def _task_complete(
     fail_reason: Optional[str] = None,
 ) -> None:
     url = f"{TASK_BASE_URL}{TASK_COMPLETE_PATH}"
+    await _wait_backend(app)
     if ocr_text is not None:
         cleaned = _sanitize_ocr_text(ocr_text or "")
         if not cleaned.strip():
@@ -395,6 +425,12 @@ async def _task_complete_with_retry(
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if _is_backend_network_error(e):
+                app.state.consumer_state["backendOk"] = False
+                app.state.consumer_state["lastBackendError"] = _truncate(str(e), 300)
+                await asyncio.sleep(TASK_NETWORK_SLEEP_SECS)
+                continue
+
             logger.exception("task complete retry taskId=%s err=%s", task_id, e)
             await asyncio.sleep(delay)
             delay = min(delay * 1.5, 30.0)
@@ -421,6 +457,12 @@ async def _task_consumer_loop(app: FastAPI) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if _is_backend_network_error(e):
+                app.state.consumer_state["backendOk"] = False
+                app.state.consumer_state["lastBackendError"] = _truncate(str(e), 300)
+                await asyncio.sleep(TASK_NETWORK_SLEEP_SECS)
+                continue
+
             logger.exception("task claim failed err=%s", e)
             app.state.consumer_state["idle"] = True
             app.state.consumer_state["currentTask"] = None
@@ -514,6 +556,8 @@ async def lifespan(app: FastAPI):
     app.state.consumer_state = {
         "enabled": TASK_CONSUMER_ENABLED,
         "paused": False,
+        "backendOk": True,
+        "lastBackendError": None,
         "idle": True,
         "currentTask": None,
         "stats": {"completed": 0, "failed": 0},
