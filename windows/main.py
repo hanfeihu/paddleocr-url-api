@@ -10,6 +10,9 @@ import os
 
 import uvicorn
 
+# Ensure PyInstaller includes the FastAPI app module.
+import app  # noqa: F401
+
 
 def main() -> None:
     # Required for multiprocessing when running as a frozen executable.

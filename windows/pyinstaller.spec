@@ -32,7 +32,7 @@ else:
 
 
 a = Analysis(
-    ['windows/main.py'],
+    ['main.py'],
     pathex=['.'],
     binaries=[],
     datas=datas,

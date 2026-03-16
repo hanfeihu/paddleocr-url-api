@@ -34,6 +34,8 @@ jobs:
       - name: Build exe (PyInstaller)
         shell: pwsh
         run: |
+          # Avoid slow model hoster connectivity checks during import-time hooks.
+          $env:PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK = "True"
           pyinstaller --noconfirm --clean windows\pyinstaller.spec
 
       - name: Download WinSW x64
