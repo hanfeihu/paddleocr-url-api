@@ -1,0 +1,31 @@
+name: build-macos-pkg
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "app.py"
+      - "requirements.txt"
+      - "run_server.sh"
+      - "installer/**"
+      - ".github/workflows/macos-build.yml"
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build pkg
+        shell: bash
+        run: |
+          bash installer/build_pkg.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paddleocr-url-api-macos-pkg
+          path: dist/paddleocr-url-api-1.0.9.pkg

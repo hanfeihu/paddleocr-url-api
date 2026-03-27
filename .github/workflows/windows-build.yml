@@ -50,6 +50,16 @@ jobs:
         run: |
           powershell -ExecutionPolicy Bypass -File windows\collect-dist.ps1
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File windows\build-installer.ps1
+
       - name: Zip artifact
         shell: pwsh
         run: |
@@ -61,3 +71,9 @@ jobs:
         with:
           name: ocr-url-api-windows-x64
           path: dist/ocr-url-api.zip
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-url-api-windows-installer-x64
+          path: dist/ocr-url-api-setup-1.0.9.exe
