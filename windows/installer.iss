@@ -5,6 +5,7 @@
 #define AppExeName "ocr-url-api.exe"
 #define ServiceInstallScript "install-service.bat"
 #define ServiceUninstallScript "uninstall-service.bat"
+#define OutputBaseName "ocr-url-api-setup-1.0.9"
 
 [Setup]
 AppId={{3EDE56D8-8EB4-4127-A97E-A420DD8BE95B}
@@ -24,7 +25,7 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
 OutputDir=dist
-OutputBaseFilename=ocr-url-api-setup-{#AppVersion}
+OutputBaseFilename={#OutputBaseName}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
