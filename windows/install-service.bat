@@ -3,14 +3,15 @@ setlocal
 
 set DIR=%~dp0
 
-if not exist "%DIR%winsw\ocr-url-api-service.exe" (
-  echo Missing WinSW service wrapper: %DIR%winsw\ocr-url-api-service.exe
-  echo See windows\winsw\README.txt
+if not exist "%DIR%ocr-url-api-service.exe" (
+  echo Missing WinSW service wrapper: %DIR%ocr-url-api-service.exe
   exit /b 1
 )
 
-copy /Y "%DIR%winsw\ocr-url-api-service.exe" "%DIR%ocr-url-api-service.exe" >nul
-copy /Y "%DIR%winsw\ocr-url-api.xml" "%DIR%ocr-url-api-service.xml" >nul
+if not exist "%DIR%ocr-url-api-service.xml" (
+  echo Missing WinSW service config: %DIR%ocr-url-api-service.xml
+  exit /b 1
+)
 
 "%DIR%ocr-url-api-service.exe" install
 "%DIR%ocr-url-api-service.exe" start
