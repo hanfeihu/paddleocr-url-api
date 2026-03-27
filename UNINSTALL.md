@@ -46,22 +46,25 @@ rm -f "$HOME/Library/Logs/paddleocr-url-api.out.log" "$HOME/Library/Logs/paddleo
 
 ---
 
-## Windows (WinSW Service)
+## Windows (Installer + WinSW Service)
 
 Install type
-- Distribution is a folder (unzipped): contains `ocr-url-api.exe`, `models\`, `install-service.bat`, `uninstall-service.bat`, etc.
-- Service wrapper: WinSW
+- Primary distribution is the installer `ocr-url-api-setup-1.0.9.exe`
+- The installer copies the application into `Program Files\OCR URL API`
+- The installed payload contains `ocr-url-api.exe`, `models\`, WinSW service files, and helper scripts
 
 Uninstall steps
+1) Open **Apps & Features** or **Installed apps** in Windows
+2) Uninstall **OCR URL API**
+
+Manual fallback
 1) Open **Command Prompt as Administrator**
-2) `cd` into the extracted folder
+2) `cd` into the installed application folder
 3) Run
 
 ```bat
 uninstall-service.bat
 ```
-
-4) Delete the whole folder
 
 Verify port 8000
 

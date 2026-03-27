@@ -12,7 +12,7 @@ Build the offline package
   bash build_offline_pkg.sh
 
 Expected output
-  dist/paddleocr-url-api-offline-1.0.8.pkg
+  dist/paddleocr-url-api-offline-1.0.9.pkg
 
 Install (offline)
   sudo bash install.sh

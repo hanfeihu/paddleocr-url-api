@@ -46,22 +46,25 @@ rm -f "$HOME/Library/Logs/paddleocr-url-api.out.log" "$HOME/Library/Logs/paddleo
 
 ---
 
-## Windows（WinSW 服务）
+## Windows（安装器 + WinSW 服务）
 
 安装形态
-- 解压后的目录包含：`ocr-url-api.exe`、`models\`、`install-service.bat`、`uninstall-service.bat` 等
-- 服务由 WinSW 包装为 Windows Service
+- 主要分发形式为安装器 `ocr-url-api-setup-1.0.9.exe`
+- 安装器会把程序复制到 `Program Files\OCR URL API`
+- 安装后的目录仍包含 `ocr-url-api.exe`、`models\`、WinSW 服务文件和辅助脚本
 
 卸载步骤
+1) 打开 Windows 的 **应用和功能** 或 **已安装的应用**
+2) 卸载 **OCR URL API**
+
+手动兜底方式
 1) 以管理员身份打开 CMD
-2) `cd` 到解压目录
+2) `cd` 到已安装目录
 3) 执行
 
 ```bat
 uninstall-service.bat
 ```
-
-4) 删除整个解压目录
 
 验证 8000 端口
 

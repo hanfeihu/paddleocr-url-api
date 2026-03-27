@@ -1,4 +1,4 @@
-Windows Build (EXE + Service)
+Windows Build (Installer + Service)
 
 Goal
 - Build a Windows x64 distribution that runs the same API as macOS.
@@ -12,6 +12,7 @@ What you get
 - dist/ocr-url-api/ocr-url-api-service.exe
 - dist/ocr-url-api/ocr-url-api-service.xml
 - dist/ocr-url-api.zip (GitHub Actions artifact)
+- dist/ocr-url-api-setup-1.0.9.exe (Windows installer)
 
 Prereqs (on a Windows x64 machine)
 - Python 3.11 x64
@@ -39,7 +40,21 @@ Prereqs (on a Windows x64 machine)
   Then collect the service wrapper + scripts into the dist root:
     powershell -ExecutionPolicy Bypass -File windows\collect-dist.ps1
 
-5) Install as a Windows Service (run cmd as Administrator)
+5) Build installer
+  powershell -ExecutionPolicy Bypass -File windows\build-installer.ps1
+
+6) Install as a Windows Service (run the installer as Administrator)
+  dist\ocr-url-api-setup-1.0.9.exe
+
+Legacy fallback
+  If you still need the unpacked folder for debugging, the ZIP artifact is kept as a secondary output.
+
+Installer behavior
+- Copies the staged payload into `Program Files\OCR URL API`
+- Runs `install-service.bat` elevated after file copy
+- Registers an uninstaller in Windows Apps & Features
+
+Manual service install from staged folder
   cd dist\ocr-url-api
   install-service.bat
 
@@ -61,16 +76,18 @@ Verify
 GitHub Actions
 - Workflow: `.github/workflows/windows-build.yml`
 - Trigger manually with `workflow_dispatch`, or by pushing packaging/code changes to `main`
-- Artifact name: `ocr-url-api-windows-x64`
-- Uploaded file: `dist/ocr-url-api.zip`
+- Artifact names:
+  - `ocr-url-api-windows-x64`
+  - `ocr-url-api-windows-installer-x64`
+- Uploaded files:
+  - `dist/ocr-url-api.zip`
+  - `dist/ocr-url-api-setup-1.0.9.exe`
 
-How to use the GitHub Actions artifact
-1. Download `ocr-url-api-windows-x64`
-2. Extract `ocr-url-api.zip`
-3. Open **Command Prompt as Administrator**
-4. `cd` into the extracted folder that contains `ocr-url-api.exe`
-5. Run `install-service.bat`
-6. Verify the service with `curl http://127.0.0.1:8000/health`
+How to use the installer artifact
+1. Download `ocr-url-api-windows-installer-x64`
+2. Run `ocr-url-api-setup-1.0.9.exe` as Administrator
+3. Finish the installer wizard
+4. Verify the service with `curl http://127.0.0.1:8000/health`
 
 Notes
 - The service uses embedded env vars from the WinSW xml.
