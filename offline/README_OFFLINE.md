@@ -8,6 +8,12 @@ What is included
 - PaddleX official OCR models (cached) under models/
 - LaunchDaemon that runs the API on port 8000
 
+Build the offline package
+  bash build_offline_pkg.sh
+
+Expected output
+  dist/paddleocr-url-api-offline-1.0.7.pkg
+
 Install (offline)
   sudo bash install.sh
 

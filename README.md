@@ -5,6 +5,34 @@ What it does
 - Downloads images concurrently, runs PaddleOCR on CPU in parallel via a process pool.
 - Returns only the original URL and the recognized text (joined by newlines).
 
+Packaging and distribution
+- macOS online installer package: `INSTALLER.md`
+- macOS offline bundle/package: `offline/README_OFFLINE.md`
+- Windows x64 EXE + service packaging: `windows/BUILD_WINDOWS.md`
+
+Platform matrix
+
+| Platform | Format | Build path | Install path | Notes |
+|---|---|---|---|---|
+| macOS (online) | `.pkg` | `bash installer/build_pkg.sh` | `sudo installer -pkg dist/paddleocr-url-api-1.0.7.pkg -target /` | Creates venv and installs deps during postinstall |
+| macOS (offline) | `.pkg` + offline bundle | `bash offline/build_offline_pkg.sh` | `sudo bash offline/install.sh` | Apple Silicon only; includes Python, wheels, and models |
+| Windows x64 | `ocr-url-api.zip` | local PyInstaller or GitHub Actions | Run `install-service.bat` as Administrator | Final zip contains EXE + WinSW service files |
+
+GitHub Actions packaging
+- Windows workflow: `.github/workflows/windows-build.yml`
+- Supports manual trigger (`workflow_dispatch`)
+- Uploads artifact: `ocr-url-api-windows-x64`
+- The artifact contains `dist/ocr-url-api.zip`
+
+Windows package usage
+1. Download the `ocr-url-api-windows-x64` artifact from GitHub Actions.
+2. Extract `ocr-url-api.zip`.
+3. Open **Command Prompt as Administrator**.
+4. `cd` into the extracted folder that contains `ocr-url-api.exe`.
+5. Run `install-service.bat`.
+6. Verify with `curl http://127.0.0.1:8000/health`.
+7. Remove with `uninstall-service.bat`.
+
 API
 - GET /health
 - POST /ocr
