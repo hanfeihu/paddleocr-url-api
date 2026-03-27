@@ -26,4 +26,8 @@ if (-not $iscc) {
 
 & $iscc $InstallerScript
 
+if ($LASTEXITCODE -ne 0) {
+  throw "Inno Setup compilation failed with exit code $LASTEXITCODE"
+}
+
 Write-Host "Built Windows installer using $InstallerScript"
