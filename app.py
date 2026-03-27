@@ -170,6 +170,13 @@ _OCR_FAST = None
 _OCR_ACCURATE = None
 
 
+class DownloadError(RuntimeError):
+    def __init__(self, api_error: str, completion_text: Optional[str] = None) -> None:
+        super().__init__(api_error)
+        self.api_error = api_error
+        self.completion_text = completion_text
+
+
 def _init_ocr_models() -> None:
     # Imports happen inside the worker process.
     from paddleocr import PaddleOCR
@@ -436,6 +443,12 @@ async def _task_complete_with_retry(
             delay = min(delay * 1.5, 30.0)
 
 
+def _task_completion_text_for_error(err: BaseException) -> Optional[str]:
+    if isinstance(err, DownloadError):
+        return err.completion_text
+    return None
+
+
 async def _task_consumer_loop(app: FastAPI) -> None:
     logger.info(
         "task consumer enabled base=%s poll=%.2fs",
@@ -510,10 +523,24 @@ async def _task_consumer_loop(app: FastAPI) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            app.state.consumer_state["stats"]["failed"] += 1
-            app.state.metrics["imagesFail"] += 1
-            logger.exception("task failed taskId=%s err=%s", task_id, e)
-            await _task_complete_with_retry(app, int(task_id), fail_reason=str(e))
+            completion_text = _task_completion_text_for_error(e)
+            if completion_text is not None:
+                logger.warning(
+                    "task completed with fallback text taskId=%s text=%s err=%s",
+                    task_id,
+                    completion_text,
+                    e,
+                )
+                await _task_complete_with_retry(
+                    app, int(task_id), ocr_text=completion_text
+                )
+                app.state.consumer_state["stats"]["completed"] += 1
+                app.state.metrics["imagesOk"] += 1
+            else:
+                app.state.consumer_state["stats"]["failed"] += 1
+                app.state.metrics["imagesFail"] += 1
+                logger.exception("task failed taskId=%s err=%s", task_id, e)
+                await _task_complete_with_retry(app, int(task_id), fail_reason=str(e))
             app.state.consumer_state["idle"] = True
             app.state.consumer_state["currentTask"] = None
 
@@ -861,13 +888,18 @@ async def _download(url: str) -> bytes:
         try:
             async with app.state.http.stream("GET", url) as r:
                 if r.status_code < 200 or r.status_code >= 300:
-                    raise RuntimeError("download_failed")
+                    completion_text = None
+                    if r.status_code == 403:
+                        completion_text = "ERROR_403"
+                    elif r.status_code == 404:
+                        completion_text = "ERROR_404"
+                    raise DownloadError("download_failed", completion_text)
 
                 content_length = r.headers.get("Content-Length")
                 if content_length:
                     try:
                         if int(content_length) > MAX_BYTES:
-                            raise RuntimeError("too_large")
+                            raise DownloadError("too_large")
                     except ValueError:
                         pass
 
@@ -878,15 +910,17 @@ async def _download(url: str) -> bytes:
                         continue
                     total += len(chunk)
                     if total > MAX_BYTES:
-                        raise RuntimeError("too_large")
+                        raise DownloadError("too_large")
                     chunks.append(chunk)
                 return b"".join(chunks)
         except httpx.TimeoutException as e:
-            raise RuntimeError("timeout") from e
+            raise DownloadError("timeout", "ERROR_TIMEOUT") from e
+        except DownloadError:
+            raise
         except RuntimeError:
             raise
         except Exception as e:
-            raise RuntimeError("download_failed") from e
+            raise DownloadError("download_failed") from e
 
 
 @app.post("/ocr", response_model=OCRResponse)
