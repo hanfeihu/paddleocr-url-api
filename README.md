@@ -14,7 +14,7 @@ Platform matrix
 
 | Platform | Format | Build path | Install path | Notes |
 |---|---|---|---|---|
-| macOS (online) | `.pkg` | `bash installer/build_pkg.sh` | `sudo installer -pkg dist/paddleocr-url-api-1.0.9.pkg -target /` | Creates venv and installs deps during postinstall |
+| macOS (online) | `.pkg` | `bash installer/build_pkg.sh` | `sudo installer -pkg dist/paddleocr-url-api-1.0.10.pkg -target /` | Creates venv and installs deps during postinstall |
 | macOS (offline) | `.pkg` + offline bundle | `bash offline/build_offline_pkg.sh` | `sudo bash offline/install.sh` | Apple Silicon only; includes Python, wheels, and models |
 | Windows x64 | `.exe` installer | GitHub Actions or local Windows build | Run the installer as Administrator | Installs files and registers the WinSW-backed service |
 
@@ -23,11 +23,11 @@ GitHub Actions packaging
 - Windows workflow: `.github/workflows/windows-build.yml`
 - Both support manual trigger (`workflow_dispatch`)
 - Release target assets:
-  - `paddleocr-url-api-1.0.9.pkg`
-  - `ocr-url-api-setup-1.0.9.exe`
+  - `paddleocr-url-api-1.0.10.pkg`
+  - `ocr-url-api-setup-1.0.10.exe`
 
 Windows package usage
-1. Download `ocr-url-api-setup-1.0.9.exe` from GitHub Releases or the Windows installer artifact.
+1. Download `ocr-url-api-setup-1.0.10.exe` from GitHub Releases or the Windows installer artifact.
 2. Run the installer as Administrator.
 3. Let the installer copy files and register the Windows service.
 4. Verify with `curl http://127.0.0.1:8000/health`.

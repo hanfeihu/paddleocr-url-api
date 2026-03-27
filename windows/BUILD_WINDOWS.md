@@ -12,7 +12,7 @@ What you get
 - dist/ocr-url-api/ocr-url-api-service.exe
 - dist/ocr-url-api/ocr-url-api-service.xml
 - dist/ocr-url-api.zip (GitHub Actions artifact)
-- dist/ocr-url-api-setup-1.0.9.exe (Windows installer)
+- dist/ocr-url-api-setup-1.0.10.exe (Windows installer)
 
 Prereqs (on a Windows x64 machine)
 - Python 3.11 x64
@@ -44,7 +44,7 @@ Prereqs (on a Windows x64 machine)
   powershell -ExecutionPolicy Bypass -File windows\build-installer.ps1
 
 6) Install as a Windows Service (run the installer as Administrator)
-  dist\ocr-url-api-setup-1.0.9.exe
+  dist\ocr-url-api-setup-1.0.10.exe
 
 Legacy fallback
   If you still need the unpacked folder for debugging, the ZIP artifact is kept as a secondary output.
@@ -81,11 +81,11 @@ GitHub Actions
   - `ocr-url-api-windows-installer-x64`
 - Uploaded files:
   - `dist/ocr-url-api.zip`
-  - `dist/ocr-url-api-setup-1.0.9.exe`
+  - `dist/ocr-url-api-setup-1.0.10.exe`
 
 How to use the installer artifact
 1. Download `ocr-url-api-windows-installer-x64`
-2. Run `ocr-url-api-setup-1.0.9.exe` as Administrator
+2. Run `ocr-url-api-setup-1.0.10.exe` as Administrator
 3. Finish the installer wizard
 4. Verify the service with `curl http://127.0.0.1:8000/health`
 

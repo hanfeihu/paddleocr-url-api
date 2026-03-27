@@ -49,7 +49,7 @@ rm -f "$HOME/Library/Logs/paddleocr-url-api.out.log" "$HOME/Library/Logs/paddleo
 ## Windows (Installer + WinSW Service)
 
 Install type
-- Primary distribution is the installer `ocr-url-api-setup-1.0.9.exe`
+- Primary distribution is the installer `ocr-url-api-setup-1.0.10.exe`
 - The installer copies the application into `Program Files\OCR URL API`
 - The installed payload contains `ocr-url-api.exe`, `models\`, WinSW service files, and helper scripts
 
