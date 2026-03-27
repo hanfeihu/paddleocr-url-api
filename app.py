@@ -168,6 +168,7 @@ class _Line:
 
 _OCR_FAST = None
 _OCR_ACCURATE = None
+APP_VERSION = "1.0.10"
 
 
 class DownloadError(RuntimeError):
@@ -556,12 +557,12 @@ async def lifespan(app: FastAPI):
     app.state.http = httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=True,
-        headers={"User-Agent": "paddleocr-url-api/1.0"},
+        headers={"User-Agent": f"paddleocr-url-api/{APP_VERSION}"},
     )
     app.state.task_http = httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=True,
-        headers={"User-Agent": "paddleocr-task-consumer/1.0"},
+        headers={"User-Agent": f"paddleocr-task-consumer/{APP_VERSION}"},
     )
     app.state.download_sem = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
     app.state.executor = ProcessPoolExecutor(
@@ -654,7 +655,7 @@ async def consumer_resume() -> JSONResponse:
 
 @app.get("/ui", response_class=HTMLResponse)
 def ui() -> str:
-    return """<!doctype html>
+    html = """<!doctype html>
 <html>
 <head>
   <meta charset=\"utf-8\" />
@@ -783,7 +784,7 @@ def ui() -> str:
 	  <header>
     <div>
       <h1>OCR Worker</h1>
-      <div class=\"sub\">Auto-claim tasks, run OCR, auto-complete + live logs</div>
+      <div class=\"sub\">Auto-claim tasks, run OCR, auto-complete + live logs · Version __APP_VERSION__</div>
     </div>
 	    <div class=\"pill\" id=\"status\">连接中...</div>
 	  </header>
@@ -878,6 +879,7 @@ def ui() -> str:
   </script>
 </body>
 </html>"""
+    return html.replace("__APP_VERSION__", APP_VERSION)
 
 
 async def _download(url: str) -> bytes:
@@ -888,7 +890,7 @@ async def _download(url: str) -> bytes:
         try:
             async with app.state.http.stream("GET", url) as r:
                 if r.status_code < 200 or r.status_code >= 300:
-                    completion_text = None
+                    completion_text = "ERROR_download_failed"
                     if r.status_code == 403:
                         completion_text = "ERROR_403"
                     elif r.status_code == 404:
@@ -920,7 +922,7 @@ async def _download(url: str) -> bytes:
         except RuntimeError:
             raise
         except Exception as e:
-            raise DownloadError("download_failed") from e
+            raise DownloadError("download_failed", "ERROR_download_failed") from e
 
 
 @app.post("/ocr", response_model=OCRResponse)
