@@ -14,7 +14,7 @@ Platform matrix
 
 | Platform | Format | Build path | Install path | Notes |
 |---|---|---|---|---|
-| macOS (online) | `.pkg` | `bash installer/build_pkg.sh` | `sudo installer -pkg dist/paddleocr-url-api-1.0.7.pkg -target /` | Creates venv and installs deps during postinstall |
+| macOS (online) | `.pkg` | `bash installer/build_pkg.sh` | `sudo installer -pkg dist/paddleocr-url-api-1.0.8.pkg -target /` | Creates venv and installs deps during postinstall |
 | macOS (offline) | `.pkg` + offline bundle | `bash offline/build_offline_pkg.sh` | `sudo bash offline/install.sh` | Apple Silicon only; includes Python, wheels, and models |
 | Windows x64 | `ocr-url-api.zip` | local PyInstaller or GitHub Actions | Run `install-service.bat` as Administrator | Final zip contains EXE + WinSW service files |
 
