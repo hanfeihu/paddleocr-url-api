@@ -49,7 +49,7 @@ rm -f "$HOME/Library/Logs/paddleocr-url-api.out.log" "$HOME/Library/Logs/paddleo
 ## Windows（安装器 + WinSW 服务）
 
 安装形态
-- 主要分发形式为安装器 `ocr-url-api-setup-1.0.12.exe`
+- 主要分发形式为安装器 `ocr-url-api-setup-1.0.13.exe`
 - 安装器会把程序复制到 `Program Files\OCR URL API`
 - 安装后的目录仍包含 `ocr-url-api.exe`、`models\`、WinSW 服务文件和辅助脚本
 
