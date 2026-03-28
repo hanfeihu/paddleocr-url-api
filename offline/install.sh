@@ -19,6 +19,22 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+cleanup_project_processes() {
+  local pattern="$1"
+  pgrep -f "$pattern" 2>/dev/null | while read -r pid; do
+    [ -n "$pid" ] || continue
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 1
+    kill -9 "$pid" >/dev/null 2>&1 || true
+  done
+}
+
+echo "Unloading previous daemon (if any)..."
+launchctl unload /Library/LaunchDaemons/com.paddleocr.urlapi.plist >/dev/null 2>&1 || true
+launchctl unload "$DAEMON_PLIST" >/dev/null 2>&1 || true
+cleanup_project_processes "/usr/local/paddleocr-url-api/run_server.sh"
+cleanup_project_processes "/usr/local/paddleocr-url-api-offline/run_server.sh"
+
 mkdir -p "$INSTALL_DIR"
 
 echo "Copying payload..."
@@ -28,11 +44,8 @@ echo "Installing LaunchDaemon..."
 cp "$ROOT_DIR/com.paddleocr.urlapi.offline.plist" "$DAEMON_PLIST"
 chmod 644 "$DAEMON_PLIST"
 
-echo "Unloading previous daemon (if any)..."
-launchctl unload "$DAEMON_PLIST" >/dev/null 2>&1 || true
-
 echo "Loading daemon..."
 launchctl load "$DAEMON_PLIST"
-launchctl start com.paddleocr.urlapi.offline || true
+launchctl kickstart -k system/com.paddleocr.urlapi.offline || true
 
 echo "Done. Verify with: curl -s http://127.0.0.1:8000/health"

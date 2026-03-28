@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 IDENTIFIER="com.paddleocr.urlapi.offline"
-VERSION="1.0.11"
+VERSION="1.0.12"
 INSTALL_DIR="/usr/local/paddleocr-url-api-offline"
 
 DIST_DIR="$ROOT_DIR/dist"
@@ -28,10 +28,23 @@ cat > "$BUILD_DIR/scripts/postinstall" <<'POST'
 #!/bin/bash
 set -euo pipefail
 
+cleanup_project_processes() {
+  local pattern="$1"
+  pgrep -f "$pattern" 2>/dev/null | while read -r pid; do
+    [ -n "$pid" ] || continue
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 1
+    kill -9 "$pid" >/dev/null 2>&1 || true
+  done
+}
+
 PLIST="/Library/LaunchDaemons/com.paddleocr.urlapi.offline.plist"
+launchctl unload /Library/LaunchDaemons/com.paddleocr.urlapi.plist >/dev/null 2>&1 || true
 launchctl unload "$PLIST" >/dev/null 2>&1 || true
+cleanup_project_processes "/usr/local/paddleocr-url-api/run_server.sh"
+cleanup_project_processes "/usr/local/paddleocr-url-api-offline/run_server.sh"
 launchctl load "$PLIST"
-launchctl start com.paddleocr.urlapi.offline || true
+launchctl kickstart -k system/com.paddleocr.urlapi.offline || true
 exit 0
 POST
 
