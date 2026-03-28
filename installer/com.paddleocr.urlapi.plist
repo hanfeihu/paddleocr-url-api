@@ -39,6 +39,9 @@
       <string>1200</string>
       <key>PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK</key>
       <string>True</string>
+
+      <key>PADDLE_PDX_CACHE_HOME</key>
+      <string>/usr/local/paddleocr-url-api/models</string>
     </dict>
   </dict>
 </plist>
