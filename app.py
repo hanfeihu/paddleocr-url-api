@@ -168,7 +168,7 @@ class _Line:
 
 _OCR_FAST = None
 _OCR_ACCURATE = None
-APP_VERSION = "1.0.11"
+APP_VERSION = "1.0.12"
 
 
 class DownloadError(RuntimeError):
@@ -861,17 +861,21 @@ def ui() -> str:
 	        status.className = 'pill ' + (!backendOk ? 'bad' : (modeRaw==='working' ? 'good' : (modeRaw==='paused' ? 'warn' : '')));
 
         const logs = await fetch('/api/logs?since=' + last).then(r=>r.json());
+        const pre = document.getElementById('log');
+        if(last === 0) pre.textContent = '';
         if(logs.items && logs.items.length){
-          const pre = document.getElementById('log');
-          if(last === 0) pre.textContent = '';
           for(const it of logs.items){
             pre.textContent += `[${it.ts}] ${it.level} ${it.msg}\\n`;
             last = it.n;
           }
           pre.scrollTop = pre.scrollHeight;
+        }else if(last === 0){
+          pre.textContent = 'No logs yet.';
         }
       }catch(e){
         document.getElementById('status').textContent = 'error';
+        const pre = document.getElementById('log');
+        if(last === 0) pre.textContent = 'Failed to load UI data.';
       }
     }
     setInterval(tick, 1000);
