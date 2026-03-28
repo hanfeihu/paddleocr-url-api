@@ -168,7 +168,7 @@ class _Line:
 
 _OCR_FAST = None
 _OCR_ACCURATE = None
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 
 
 class DownloadError(RuntimeError):
