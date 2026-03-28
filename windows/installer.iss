@@ -1,11 +1,11 @@
 #define AppName "OCR URL API"
-#define AppVersion "1.0.12"
+#define AppVersion "1.0.13"
 #define AppPublisher "hanfeihu"
 #define AppURL "https://github.com/hanfeihu/paddleocr-url-api"
 #define AppExeName "ocr-url-api.exe"
 #define ServiceInstallScript "install-service.bat"
 #define ServiceUninstallScript "uninstall-service.bat"
-#define OutputBaseName "ocr-url-api-setup-1.0.12"
+#define OutputBaseName "ocr-url-api-setup-1.0.13"
 
 [Setup]
 AppId={{3EDE56D8-8EB4-4127-A97E-A420DD8BE95B}
