@@ -5,7 +5,10 @@ INSTALL_DIR="/usr/local/paddleocr-url-api"
 
 cleanup_project_processes() {
   local pattern="$1"
-  pgrep -f "$pattern" 2>/dev/null | while read -r pid; do
+  local pids
+  pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+  [ -n "$pids" ] || return 0
+  printf '%s\n' "$pids" | while read -r pid; do
     [ -n "$pid" ] || continue
     kill "$pid" >/dev/null 2>&1 || true
     sleep 1
@@ -18,7 +21,7 @@ cleanup_project_processes "/usr/local/paddleocr-url-api/run_server.sh"
 cleanup_project_processes "/usr/local/paddleocr-url-api-offline/run_server.sh"
 
 launchctl unload /Library/LaunchDaemons/com.paddleocr.urlapi.plist >/dev/null 2>&1 || true
-launchctl load /Library/LaunchDaemons/com.paddleocr.urlapi.plist
+launchctl load /Library/LaunchDaemons/com.paddleocr.urlapi.plist >/dev/null 2>&1 || true
 launchctl kickstart -k system/com.paddleocr.urlapi || true
 
 exit 0

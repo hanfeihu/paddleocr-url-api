@@ -21,7 +21,10 @@ fi
 
 cleanup_project_processes() {
   local pattern="$1"
-  pgrep -f "$pattern" 2>/dev/null | while read -r pid; do
+  local pids
+  pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+  [ -n "$pids" ] || return 0
+  printf '%s\n' "$pids" | while read -r pid; do
     [ -n "$pid" ] || continue
     kill "$pid" >/dev/null 2>&1 || true
     sleep 1
@@ -45,7 +48,7 @@ cp "$ROOT_DIR/com.paddleocr.urlapi.offline.plist" "$DAEMON_PLIST"
 chmod 644 "$DAEMON_PLIST"
 
 echo "Loading daemon..."
-launchctl load "$DAEMON_PLIST"
+launchctl load "$DAEMON_PLIST" >/dev/null 2>&1 || true
 launchctl kickstart -k system/com.paddleocr.urlapi.offline || true
 
 echo "Done. Verify with: curl -s http://127.0.0.1:8000/health"
