@@ -101,6 +101,10 @@ READ_TIMEOUT = float(os.getenv("OCR_READ_TIMEOUT", "15"))
 
 # OCR parallelism (multi-process)
 OCR_WORKERS = int(os.getenv("OCR_WORKERS", "6"))
+OCR_SUBMIT_CONCURRENCY = int(
+    os.getenv("OCR_SUBMIT_CONCURRENCY", str(max(1, OCR_WORKERS)))
+)
+OCR_WORKER_MAX_TASKS = int(os.getenv("OCR_WORKER_MAX_TASKS", "100"))
 
 # Only fallback to the accurate preset on sufficiently large images.
 SIZE_GATE = int(os.getenv("OCR_SIZE_GATE", "1200"))
@@ -115,6 +119,10 @@ TASK_PUBLIC_IP = os.getenv("OCR_TASK_PUBLIC_IP", "").strip() or None
 TASK_MAX_OCR_TEXT_LEN = int(os.getenv("OCR_TASK_MAX_OCR_TEXT_LEN", "8000"))
 TASK_EMPTY_OCR_TEXT = os.getenv("OCR_TASK_EMPTY_OCR_TEXT", "...")
 TASK_NETWORK_SLEEP_SECS = float(os.getenv("OCR_TASK_NETWORK_SLEEP_SECS", "5"))
+TASK_COMPLETE_MAX_RETRIES = int(os.getenv("OCR_TASK_COMPLETE_MAX_RETRIES", "8"))
+TASK_COMPLETE_NETWORK_MAX_RETRIES = int(
+    os.getenv("OCR_TASK_COMPLETE_NETWORK_MAX_RETRIES", "24")
+)
 
 
 def _is_backend_network_error(e: BaseException) -> bool:
@@ -168,7 +176,7 @@ class _Line:
 
 _OCR_FAST = None
 _OCR_ACCURATE = None
-APP_VERSION = "1.0.14"
+APP_VERSION = "1.0.18"
 
 
 class DownloadError(RuntimeError):
@@ -336,7 +344,8 @@ def ocr_image_bytes(image_bytes: bytes) -> str:
     if _OCR_FAST is None or _OCR_ACCURATE is None:
         _init_ocr_models()
 
-    im = Image.open(BytesIO(image_bytes)).convert("RGB")
+    with Image.open(BytesIO(image_bytes)) as source_im:
+        im = source_im.convert("RGB")
     w, h = im.size
     import numpy as np
 
@@ -424,6 +433,8 @@ async def _task_complete_with_retry(
     fail_reason: Optional[str] = None,
 ) -> None:
     delay = 2.0
+    attempts = 0
+    network_attempts = 0
     while True:
         try:
             await _task_complete(
@@ -434,10 +445,22 @@ async def _task_complete_with_retry(
             raise
         except Exception as e:
             if _is_backend_network_error(e):
+                network_attempts += 1
                 app.state.consumer_state["backendOk"] = False
                 app.state.consumer_state["lastBackendError"] = _truncate(str(e), 300)
+                if network_attempts >= TASK_COMPLETE_NETWORK_MAX_RETRIES:
+                    raise RuntimeError(
+                        "task complete gave up after "
+                        f"{network_attempts} network retries: {e}"
+                    ) from e
                 await asyncio.sleep(TASK_NETWORK_SLEEP_SECS)
                 continue
+
+            attempts += 1
+            if attempts >= TASK_COMPLETE_MAX_RETRIES:
+                raise RuntimeError(
+                    f"task complete gave up after {attempts} attempts: {e}"
+                ) from e
 
             logger.exception("task complete retry taskId=%s err=%s", task_id, e)
             await asyncio.sleep(delay)
@@ -450,13 +473,56 @@ def _task_completion_text_for_error(err: BaseException) -> Optional[str]:
     return None
 
 
+def _create_ocr_executor() -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(max_workers=OCR_WORKERS, initializer=_init_ocr_models)
+
+
+async def _prewarm_executor(app: FastAPI) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(app.state.executor, _init_ocr_models)
+    except Exception:
+        logger.exception("failed to prewarm ocr workers")
+
+
+async def _run_ocr_job(app: FastAPI, data: bytes) -> str:
+    async with app.state.ocr_sem:
+        loop = asyncio.get_running_loop()
+        async with app.state.executor_lock:
+            executor = app.state.executor
+            app.state.executor_active += 1
+
+        try:
+            return await loop.run_in_executor(executor, ocr_image_bytes, data)
+        finally:
+            recycle_old: Optional[ProcessPoolExecutor] = None
+            async with app.state.executor_lock:
+                app.state.executor_active -= 1
+                app.state.executor_jobs += 1
+                should_recycle = (
+                    OCR_WORKER_MAX_TASKS > 0
+                    and app.state.executor_jobs >= OCR_WORKER_MAX_TASKS
+                    and app.state.executor_active == 0
+                )
+                if should_recycle:
+                    recycle_old = app.state.executor
+                    app.state.executor = _create_ocr_executor()
+                    app.state.executor_jobs = 0
+
+            if recycle_old is not None:
+                logger.info(
+                    "recycling ocr executor after %s jobs", OCR_WORKER_MAX_TASKS
+                )
+                await _prewarm_executor(app)
+                recycle_old.shutdown(wait=False, cancel_futures=False)
+
+
 async def _task_consumer_loop(app: FastAPI) -> None:
     logger.info(
         "task consumer enabled base=%s poll=%.2fs",
         TASK_BASE_URL,
         TASK_POLL_SECS,
     )
-    loop = asyncio.get_running_loop()
 
     while True:
         if app.state.consumer_state.get("paused"):
@@ -514,13 +580,11 @@ async def _task_consumer_loop(app: FastAPI) -> None:
         try:
             data = await _download(str(image_url))
             app.state.metrics["imagesTotal"] += 1
-            text = await loop.run_in_executor(app.state.executor, ocr_image_bytes, data)
+            text = await _run_ocr_job(app, data)
             await _task_complete_with_retry(app, int(task_id), ocr_text=text or "")
             app.state.consumer_state["stats"]["completed"] += 1
             app.state.metrics["imagesOk"] += 1
             logger.info("completed taskId=%s text_len=%s", task_id, len(text or ""))
-            app.state.consumer_state["idle"] = True
-            app.state.consumer_state["currentTask"] = None
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -542,6 +606,7 @@ async def _task_consumer_loop(app: FastAPI) -> None:
                 app.state.metrics["imagesFail"] += 1
                 logger.exception("task failed taskId=%s err=%s", task_id, e)
                 await _task_complete_with_retry(app, int(task_id), fail_reason=str(e))
+        finally:
             app.state.consumer_state["idle"] = True
             app.state.consumer_state["currentTask"] = None
 
@@ -565,15 +630,13 @@ async def lifespan(app: FastAPI):
         headers={"User-Agent": f"paddleocr-task-consumer/{APP_VERSION}"},
     )
     app.state.download_sem = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
-    app.state.executor = ProcessPoolExecutor(
-        max_workers=OCR_WORKERS, initializer=_init_ocr_models
-    )
+    app.state.ocr_sem = asyncio.Semaphore(max(1, OCR_SUBMIT_CONCURRENCY))
+    app.state.executor_lock = asyncio.Lock()
+    app.state.executor_jobs = 0
+    app.state.executor_active = 0
+    app.state.executor = _create_ocr_executor()
     # Best-effort prewarm to avoid first-request latency inside the process pool.
-    try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(app.state.executor, _init_ocr_models)
-    except Exception:
-        logger.exception("failed to prewarm ocr workers")
+    await _prewarm_executor(app)
 
     app.state.started_at = datetime.now(timezone.utc)
     app.state.metrics = {
@@ -601,6 +664,8 @@ async def lifespan(app: FastAPI):
             consumer_task.cancel()
             try:
                 await consumer_task
+            except asyncio.CancelledError:
+                pass
             except Exception:
                 pass
 
@@ -665,14 +730,19 @@ def ui() -> str:
     :root {
       --bg0:#070A12;
       --bg1:#0B1120;
+      --bg2:#121A2E;
       --panel:rgba(15, 23, 42, .78);
       --panel2:rgba(2, 6, 23, .55);
+      --panel3:rgba(15, 23, 42, .58);
       --stroke:rgba(148, 163, 184, .18);
+      --stroke-strong:rgba(148, 163, 184, .28);
       --text:#E7EEF9;
       --muted:#9FB3D7;
+      --soft:#C7D6F2;
       --good:#2DD4BF;
       --warn:#FBBF24;
       --bad:#FB7185;
+      --accent:#38BDF8;
       --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;
       --serif: Georgia, \"Iowan Old Style\", \"Palatino Linotype\", Palatino, serif;
     }
@@ -686,28 +756,35 @@ def ui() -> str:
         radial-gradient(900px 700px at 40% 110%, rgba(251,191,36,.10), transparent 55%),
         linear-gradient(180deg, var(--bg0), var(--bg1));
       font: 14px/1.45 system-ui, -apple-system, Segoe UI, Helvetica, Arial;
+      min-height:100vh;
     }
     header {
-      padding: 18px 18px 14px;
-      border-bottom:1px solid var(--stroke);
+      padding: 20px 20px 16px;
+      border-bottom:1px solid rgba(148, 163, 184, .14);
       display:flex;
-      align-items:flex-end;
+      align-items:flex-start;
       justify-content:space-between;
-      gap:12px;
+      gap:16px;
     }
     header h1 {
       margin:0;
-      font: 700 18px/1.15 var(--serif);
-      letter-spacing:.2px;
+      font: 700 20px/1.1 var(--serif);
+      letter-spacing:.25px;
     }
     header .sub {
       color:var(--muted);
       font-size:12px;
       margin-top:6px;
     }
+    .header-meta {
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      margin-top:14px;
+    }
     .pill {
       font-size:12px;
-      color:var(--muted);
+      color:var(--soft);
       padding:6px 10px;
       border:1px solid var(--stroke);
       border-radius:999px;
@@ -715,21 +792,67 @@ def ui() -> str:
       backdrop-filter: blur(10px);
       white-space:nowrap;
     }
+    .pill strong {
+      color:var(--text);
+      font-weight:700;
+    }
+    .status-hero {
+      min-width: 250px;
+      padding: 14px 16px;
+      border:1px solid var(--stroke);
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(15,23,42,.78), rgba(2,6,23,.52));
+      box-shadow: 0 20px 50px rgba(0,0,0,.28);
+      backdrop-filter: blur(14px);
+    }
+    .status-label {
+      color:var(--muted);
+      font-size:11px;
+      letter-spacing:.16em;
+      text-transform:uppercase;
+      margin-bottom:8px;
+    }
+    .status-main {
+      display:flex;
+      align-items:center;
+      gap:10px;
+      font-size:17px;
+      font-weight:700;
+      color:var(--text);
+    }
+    .status-dot {
+      width:10px;
+      height:10px;
+      border-radius:50%;
+      background:var(--muted);
+      box-shadow:0 0 0 6px rgba(159,179,215,.12);
+      flex:none;
+    }
+    .status-main.good .status-dot { background:var(--good); box-shadow:0 0 0 6px rgba(45,212,191,.12); }
+    .status-main.warn .status-dot { background:var(--warn); box-shadow:0 0 0 6px rgba(251,191,36,.12); }
+    .status-main.bad .status-dot { background:var(--bad); box-shadow:0 0 0 6px rgba(251,113,133,.12); }
+    .status-detail {
+      margin-top:8px;
+      color:var(--muted);
+      font-size:12px;
+      line-height:1.5;
+    }
     main {
       display:grid;
-      grid-template-columns: 1fr 1.4fr;
-      gap: 14px;
-      padding: 14px;
+      grid-template-columns: minmax(340px, 0.95fr) minmax(420px, 1.35fr);
+      gap: 16px;
+      padding: 16px;
     }
     .card {
       border:1px solid var(--stroke);
-      border-radius: 14px;
-      background: var(--panel);
+      border-radius: 18px;
+      background: linear-gradient(180deg, var(--panel), rgba(8, 15, 31, .82));
       box-shadow: 0 18px 60px rgba(0,0,0,.35);
       overflow:hidden;
+      backdrop-filter: blur(16px);
     }
     .card .hd {
-      padding: 12px 12px 10px;
+      padding: 14px 14px 12px;
       border-bottom:1px solid rgba(148,163,184,.14);
       display:flex;
       align-items:center;
@@ -742,143 +865,604 @@ def ui() -> str:
       letter-spacing:.2px;
       text-transform: uppercase;
     }
-    .card .bd { padding: 12px; }
-    .grid { display:grid; grid-template-columns: 150px 1fr; gap:10px; }
-    .row { padding: 8px 0; border-bottom:1px dashed rgba(148,163,184,.16); }
+    .card .bd { padding: 14px; }
+    .stack { display:grid; gap:16px; }
+    .summary-grid {
+      display:grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap:12px;
+      margin-bottom:14px;
+    }
+    .metric {
+      padding: 14px;
+      border:1px solid rgba(148,163,184,.14);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(15,23,42,.55), rgba(15,23,42,.28));
+    }
+    .metric .k {
+      margin-bottom:6px;
+      color:var(--muted);
+      font-size:12px;
+    }
+    .metric .num {
+      font: 700 24px/1.05 var(--serif);
+      letter-spacing:.3px;
+      color:var(--text);
+    }
+    .metric .hint {
+      margin-top:6px;
+      color:var(--muted);
+      font-size:12px;
+    }
+    .grid { display:grid; grid-template-columns: 1fr; gap:0; }
+    .row {
+      display:grid;
+      grid-template-columns: 120px minmax(0, 1fr);
+      align-items:start;
+      gap:14px;
+      padding: 12px 0;
+      border-bottom:1px dashed rgba(148,163,184,.16);
+    }
     .row:last-child { border-bottom:none; }
-    .k { color: var(--muted); font-size: 12px; }
-    .v { font-family: var(--mono); word-break: break-all; white-space: pre-wrap; }
-    .btns { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+    .k {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+      padding-top: 2px;
+    }
+    .v {
+      color:var(--soft);
+      font-family: var(--mono);
+      line-height: 1.65;
+      min-width: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .v strong { color:var(--text); }
+    .value-block {
+      display:inline-flex;
+      max-width:100%;
+      padding:8px 10px;
+      border:1px solid rgba(148,163,184,.12);
+      border-radius: 12px;
+      background: rgba(2,6,23,.24);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.02);
+    }
+    .value-block.url {
+      display:flex;
+      align-items:flex-start;
+    }
+    .value-block.time {
+      letter-spacing:.02em;
+      white-space:normal;
+    }
+    .btns { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; align-items:center; }
     button {
       appearance:none;
       border:1px solid var(--stroke);
-      background: rgba(2,6,23,.55);
+      background: rgba(2,6,23,.62);
       color: var(--text);
-      padding: 8px 10px;
-      border-radius: 10px;
+      padding: 9px 12px;
+      border-radius: 12px;
       font-weight: 600;
       cursor:pointer;
+      transition: border-color .18s ease, background .18s ease, transform .18s ease, opacity .18s ease;
     }
-    button:hover { border-color: rgba(148,163,184,.35); }
+    button:hover { border-color: rgba(148,163,184,.35); background: rgba(15,23,42,.82); }
     button:active { transform: translateY(1px); }
+    button[disabled] { opacity:.45; cursor:not-allowed; }
+    .btn-primary { border-color: rgba(56,189,248,.3); background: rgba(56,189,248,.14); }
+    .btn-primary:hover { border-color: rgba(56,189,248,.45); background: rgba(56,189,248,.2); }
+    .btn-warn { border-color: rgba(251,191,36,.28); background: rgba(251,191,36,.12); }
+    .btn-warn:hover { border-color: rgba(251,191,36,.4); background: rgba(251,191,36,.18); }
+    .task-card {
+      padding: 14px;
+      border:1px solid rgba(56,189,248,.16);
+      border-radius: 16px;
+      background:
+        linear-gradient(180deg, rgba(56,189,248,.08), transparent 60%),
+        rgba(8,15,31,.52);
+    }
+    .task-head {
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      margin-bottom:12px;
+    }
+    .task-title {
+      font: 700 17px/1.2 var(--serif);
+      color:var(--text);
+      margin:0;
+    }
+    .task-sub {
+      color:var(--muted);
+      font-size:12px;
+      margin-top:4px;
+    }
+    .task-grid {
+      display:grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap:12px;
+      margin-bottom:12px;
+    }
+    .task-field {
+      padding:12px;
+      border:1px solid rgba(148,163,184,.14);
+      border-radius: 14px;
+      background: rgba(15,23,42,.4);
+    }
+    .task-field .label {
+      color:var(--muted);
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:.12em;
+      margin-bottom:6px;
+    }
+    .task-field .value {
+      color:var(--text);
+      font-family:var(--mono);
+      line-height:1.65;
+      min-width:0;
+      white-space:pre-wrap;
+      overflow-wrap:anywhere;
+      word-break:break-word;
+    }
+    .task-url {
+      padding:12px;
+      border-radius:14px;
+      background:rgba(2,6,23,.38);
+      border:1px solid rgba(148,163,184,.14);
+    }
+    .task-url .label {
+      color:var(--muted);
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:.12em;
+      margin-bottom:6px;
+    }
+    .task-url .value {
+      display:block;
+      color:var(--soft);
+      font-family:var(--mono);
+      line-height:1.7;
+      white-space:pre-wrap;
+      overflow-wrap:anywhere;
+      word-break:break-word;
+    }
+    .task-empty {
+      padding:16px;
+      border:1px dashed rgba(148,163,184,.2);
+      border-radius:16px;
+      color:var(--muted);
+      background:rgba(2,6,23,.2);
+    }
     .good { color: var(--good); }
     .bad { color: var(--bad); }
     .warn { color: var(--warn); }
+    .soft { color: var(--muted); }
+    .inline-status {
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:7px 10px;
+      border-radius:999px;
+      border:1px solid var(--stroke);
+      background:rgba(2,6,23,.35);
+      font-size:12px;
+      color:var(--soft);
+    }
+    .inline-status::before {
+      content:'';
+      width:8px;
+      height:8px;
+      border-radius:50%;
+      background:currentColor;
+      opacity:.9;
+    }
+    .action-note {
+      min-height:20px;
+      color:var(--muted);
+      font-size:12px;
+      text-align:right;
+    }
+    .log-toolbar {
+      display:flex;
+      flex-wrap:wrap;
+      align-items:center;
+      gap:8px;
+    }
+    .toggle {
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:7px 10px;
+      border:1px solid var(--stroke);
+      border-radius:999px;
+      background:rgba(2,6,23,.35);
+      color:var(--soft);
+      font-size:12px;
+      cursor:pointer;
+      user-select:none;
+    }
+    .toggle input { accent-color: var(--accent); }
+    .log-meta {
+      color:var(--muted);
+      font-size:12px;
+    }
     pre {
       margin:0;
-      padding: 12px;
-      height: 70vh;
+      padding: 14px;
+      height: 68vh;
       overflow:auto;
-      background: var(--panel2);
+      background: linear-gradient(180deg, rgba(2,6,23,.58), rgba(2,6,23,.42));
       border:1px solid rgba(148,163,184,.16);
-      border-radius: 12px;
+      border-radius: 14px;
       font-family: var(--mono);
       font-size: 12px;
-      line-height: 1.4;
+      line-height: 1.55;
       white-space: pre-wrap;
+      color:var(--soft);
+      tab-size:2;
     }
-    @media (max-width: 980px) { main { grid-template-columns: 1fr; } pre { height: 52vh; } }
+    .log-placeholder { color:var(--muted); }
+    .muted-link {
+      text-decoration:none;
+      color:var(--soft);
+    }
+    @media (max-width: 980px) {
+      header { flex-direction:column; }
+      .status-hero { width:100%; }
+      main { grid-template-columns: 1fr; }
+      pre { height: 50vh; }
+    }
+    @media (max-width: 640px) {
+      .summary-grid, .task-grid { grid-template-columns: 1fr; }
+      .grid { grid-template-columns: 1fr; }
+      .btns { justify-content:flex-start; }
+    }
   </style>
 </head>
 <body>
-	  <header>
+  <header>
     <div>
       <h1>OCR Worker</h1>
       <div class=\"sub\">Auto-claim tasks, run OCR, auto-complete + live logs · Version __APP_VERSION__</div>
+      <div class=\"header-meta\">
+        <div class=\"pill\"><strong id=\"summaryMode\">连接中...</strong></div>
+        <div class=\"pill\">后端 <strong id=\"summaryBackend\">-</strong></div>
+        <div class=\"pill\">轮询 <strong id=\"summaryPoll\">-</strong></div>
+        <div class=\"pill\">已完成 <strong id=\"consumerCompleted\">0</strong></div>
+        <div class=\"pill\">已失败 <strong id=\"consumerFailed\">0</strong></div>
+      </div>
     </div>
-	    <div class=\"pill\" id=\"status\">连接中...</div>
-	  </header>
+    <div class=\"status-hero\">
+      <div class=\"status-label\">状态总览</div>
+      <div class=\"status-main\" id=\"statusMain\"><span class=\"status-dot\"></span><span id=\"statusText\">连接中...</span></div>
+      <div class=\"status-detail\" id=\"statusDetail\">正在加载运行状态与日志。</div>
+    </div>
+  </header>
 
   <main>
     <section class=\"card\">
-	      <div class=\"hd\">
-	        <div class=\"t\">运行状态</div>
-	        <div class=\"btns\">
-	          <button id=\"pauseBtn\">暂停</button>
-	          <button id=\"resumeBtn\">继续</button>
-	          <a class=\"pill\" href=\"/docs\" target=\"_blank\" style=\"text-decoration:none\">接口文档</a>
-	        </div>
-	      </div>
+      <div class=\"hd\">
+        <div class=\"t\">运行状态</div>
+        <div class=\"btns\">
+          <button id=\"pauseBtn\" class=\"btn-warn\">暂停消费</button>
+          <button id=\"resumeBtn\" class=\"btn-primary\">恢复消费</button>
+          <a class=\"pill muted-link\" href=\"/docs\" target=\"_blank\">接口文档</a>
+        </div>
+      </div>
       <div class=\"bd\">
-        <div class=\"grid\">
-	          <div class=\"row\"><div class=\"k\">运行时长</div><div class=\"v\" id=\"uptime\">-</div></div>
-	          <div class=\"row\"><div class=\"k\">处理总数</div><div class=\"v\" id=\"imgTotal\">0</div></div>
-	          <div class=\"row\"><div class=\"k\">成功</div><div class=\"v good\" id=\"imgOk\">0</div></div>
-	          <div class=\"row\"><div class=\"k\">失败</div><div class=\"v bad\" id=\"imgFail\">0</div></div>
-	          <div class=\"row\"><div class=\"k\">消费状态</div><div class=\"v\" id=\"consumer\">-</div></div>
-	          <div class=\"row\"><div class=\"k\">当前任务</div><div class=\"v\" id=\"task\">-</div></div>
-	          <div class=\"row\"><div class=\"k\">后端服务</div><div class=\"v\" id=\"backend\">-</div></div>
-	          <div class=\"row\"><div class=\"k\">网络状态</div><div class=\"v\" id=\"net\">-</div></div>
-	        </div>
-	      </div>
-	    </section>
+        <div class=\"summary-grid\">
+          <div class=\"metric\"><div class=\"k\">运行时长</div><div class=\"num\" id=\"uptime\">-</div><div class=\"hint\">服务启动后持续累计</div></div>
+          <div class=\"metric\"><div class=\"k\">图片处理总数</div><div class=\"num\" id=\"imgTotal\">0</div><div class=\"hint\">下载并进入 OCR 的累计次数</div></div>
+          <div class=\"metric\"><div class=\"k\">识别成功</div><div class=\"num good\" id=\"imgOk\">0</div><div class=\"hint\">接口与消费任务共用统计</div></div>
+          <div class=\"metric\"><div class=\"k\">识别失败</div><div class=\"num bad\" id=\"imgFail\">0</div><div class=\"hint\">下载失败或 OCR 异常</div></div>
+        </div>
 
-	    <section class=\"card\">
-	      <div class=\"hd\"><div class=\"t\">日志</div><div class=\"pill\">自动滚动</div></div>
-	      <div class=\"bd\"><pre id=\"log\">Loading...</pre></div>
-	    </section>
+        <div class=\"stack\">
+          <div>
+            <div class=\"grid\">
+              <div class=\"row\"><div class=\"k\">消费状态</div><div class=\"v\"><span class=\"inline-status\" id=\"consumerBadge\">-</span></div></div>
+              <div class=\"row\"><div class=\"k\">网络状态</div><div class=\"v\" id=\"net\">-</div></div>
+              <div class=\"row\"><div class=\"k\">后端服务</div><div class=\"v\" id=\"backend\">-</div></div>
+              <div class=\"row\"><div class=\"k\">启动时间</div><div class=\"v\" id=\"startedAt\">-</div></div>
+            </div>
+            <div class=\"action-note\" id=\"actionNote\">控制操作准备就绪。</div>
+          </div>
+
+          <div class=\"task-card\">
+            <div class=\"task-head\">
+              <div>
+                <h2 class=\"task-title\">当前任务</h2>
+                <div class=\"task-sub\" id=\"taskLead\">等待状态数据…</div>
+              </div>
+              <div class=\"pill\" id=\"taskStatePill\">无任务</div>
+            </div>
+            <div id=\"taskPanel\" class=\"task-empty\">当前没有正在处理的任务。</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class=\"card\">
+      <div class=\"hd\">
+        <div class=\"t\">日志</div>
+        <div class=\"log-toolbar\">
+          <label class=\"toggle\"><input type=\"checkbox\" id=\"followToggle\" checked /> 跟随最新</label>
+          <div class=\"log-meta\" id=\"logMeta\">等待日志…</div>
+        </div>
+      </div>
+      <div class=\"bd\"><pre id=\"log\" class=\"log-placeholder\">正在加载日志…</pre></div>
+    </section>
   </main>
 
   <script>
-    let last = 0;
-    function fmtSec(s){
-      const h = Math.floor(s/3600);
-      const m = Math.floor((s%3600)/60);
-      const ss = Math.floor(s%60);
-      return `${h}h ${m}m ${ss}s`;
+    var last = 0;
+    var pollTimer = null;
+    var actionTimer = null;
+    var pollDelay = 1000;
+    var lastLogTs = '';
+    var hadLogs = false;
+
+    var el = {
+      statusMain: document.getElementById('statusMain'),
+      statusText: document.getElementById('statusText'),
+      statusDetail: document.getElementById('statusDetail'),
+      summaryMode: document.getElementById('summaryMode'),
+      summaryBackend: document.getElementById('summaryBackend'),
+      summaryPoll: document.getElementById('summaryPoll'),
+      consumerCompleted: document.getElementById('consumerCompleted'),
+      consumerFailed: document.getElementById('consumerFailed'),
+      uptime: document.getElementById('uptime'),
+      imgTotal: document.getElementById('imgTotal'),
+      imgOk: document.getElementById('imgOk'),
+      imgFail: document.getElementById('imgFail'),
+      consumerBadge: document.getElementById('consumerBadge'),
+      net: document.getElementById('net'),
+      backend: document.getElementById('backend'),
+      startedAt: document.getElementById('startedAt'),
+      actionNote: document.getElementById('actionNote'),
+      pauseBtn: document.getElementById('pauseBtn'),
+      resumeBtn: document.getElementById('resumeBtn'),
+      taskLead: document.getElementById('taskLead'),
+      taskStatePill: document.getElementById('taskStatePill'),
+      taskPanel: document.getElementById('taskPanel'),
+      log: document.getElementById('log'),
+      logMeta: document.getElementById('logMeta'),
+      followToggle: document.getElementById('followToggle')
+    };
+
+    function fmtSec(s) {
+      var h = Math.floor(s / 3600);
+      var m = Math.floor((s % 3600) / 60);
+      var ss = Math.floor(s % 60);
+      var parts = [];
+      if (h) parts.push(String(h) + 'h');
+      if (h || m) parts.push(String(m) + 'm');
+      parts.push(String(ss) + 's');
+      return parts.join(' ');
     }
-    function fmtTask(t){
-      if(!t) return '-';
-      const head = `id=${t.id} spuId=${t.spuId ?? ''} type=${t.imageType ?? ''}`.trim();
-      return head + "\\n" + (t.imageUrl || '');
+
+    function fmtDate(ts) {
+      if (!ts) return '-';
+      var d = new Date(ts);
+      if (isNaN(d.getTime())) return ts;
+      return d.toLocaleString('zh-CN');
     }
-	    async function post(path){
-	      const r = await fetch(path, {method:'POST'});
-	      if(!r.ok) throw new Error('http ' + r.status);
-	    }
-    document.getElementById('pauseBtn').onclick = () => post('/api/consumer/pause');
-    document.getElementById('resumeBtn').onclick = () => post('/api/consumer/resume');
 
-    async function tick(){
-      try{
-        const s = await fetch('/api/state').then(r=>r.json());
-        document.getElementById('uptime').textContent = fmtSec(s.uptimeSeconds || 0);
-        document.getElementById('imgTotal').textContent = s.metrics.imagesTotal;
-        document.getElementById('imgOk').textContent = s.metrics.imagesOk;
-        document.getElementById('imgFail').textContent = s.metrics.imagesFail;
+    function escapeHtml(value) {
+      var safe = value == null ? '' : String(value);
+      return safe.replace(/[&<>\"]/g, function (ch) {
+        if (ch === '&') return '&amp;';
+        if (ch === '<') return '&lt;';
+        if (ch === '>') return '&gt;';
+        if (ch === '"') return '&quot;';
+        return ch;
+      });
+    }
 
-	        const c = s.consumer;
-	        const backendOk = (c.backendOk === undefined) ? true : !!c.backendOk;
-	        const modeRaw = c.enabled ? (c.paused ? 'paused' : (c.idle ? 'idle' : 'working')) : 'api-only';
-	        const modeCn = (modeRaw==='api-only') ? '仅接口模式' : (modeRaw==='paused' ? '已暂停' : (modeRaw==='working' ? '执行中' : '空闲'));
-	        document.getElementById('consumer').textContent = modeCn;
-	        document.getElementById('task').textContent = fmtTask(c.currentTask);
-	        document.getElementById('backend').textContent = s.config.taskBaseUrl + ` (轮询 ${s.config.taskPollSecs}s)`;
-	        document.getElementById('net').textContent = backendOk ? '正常' : ('网络异常: ' + (c.lastBackendError || ''));
+    function modeInfo(c) {
+      var enabled = !!(c && c.enabled);
+      var paused = !!(c && c.paused);
+      var idle = !!(c && c.idle);
+      var backendOk = c && c.backendOk !== undefined ? !!c.backendOk : true;
+      if (!enabled) return { key: 'api-only', label: '仅接口模式', detail: '未启用任务消费器，仅提供 OCR 接口。', tone: backendOk ? '' : 'bad' };
+      if (!backendOk) return { key: 'network', label: '网络异常', detail: c.lastBackendError ? ('与后端通信失败：' + c.lastBackendError) : '与后端通信失败，请检查网络或后端服务。', tone: 'bad' };
+      if (paused) return { key: 'paused', label: '已暂停', detail: '消费器已暂停，不会继续领取新任务。', tone: 'warn' };
+      if (idle) return { key: 'idle', label: '空闲待命', detail: '消费器在线，正在等待可领取的新任务。', tone: '' };
+      return { key: 'working', label: '执行中', detail: '正在处理已领取任务，完成后会自动回传结果。', tone: 'good' };
+    }
 
-	        const status = document.getElementById('status');
-	        status.textContent = backendOk ? modeCn : '网络异常';
-	        status.className = 'pill ' + (!backendOk ? 'bad' : (modeRaw==='working' ? 'good' : (modeRaw==='paused' ? 'warn' : '')));
+    function setActionNote(text, tone) {
+      tone = tone || '';
+      el.actionNote.textContent = text;
+      el.actionNote.className = ('action-note ' + tone).trim();
+      if (actionTimer) clearTimeout(actionTimer);
+      actionTimer = setTimeout(function () {
+        el.actionNote.textContent = '控制操作准备就绪。';
+        el.actionNote.className = 'action-note';
+      }, 3200);
+    }
 
-        const logs = await fetch('/api/logs?since=' + last).then(r=>r.json());
-        const pre = document.getElementById('log');
-        if(last === 0) pre.textContent = '';
-        if(logs.items && logs.items.length){
-          for(const it of logs.items){
-            pre.textContent += `[${it.ts}] ${it.level} ${it.msg}\\n`;
-            last = it.n;
-          }
-          pre.scrollTop = pre.scrollHeight;
-        }else if(last === 0){
-          pre.textContent = 'No logs yet.';
-        }
-      }catch(e){
-        document.getElementById('status').textContent = 'error';
-        const pre = document.getElementById('log');
-        if(last === 0) pre.textContent = 'Failed to load UI data.';
+    function setButtons(c) {
+      var enabled = !!(c && c.enabled);
+      var paused = !!(c && c.paused);
+      el.pauseBtn.disabled = !enabled || paused;
+      el.resumeBtn.disabled = !enabled || !paused;
+    }
+
+    function renderTask(c) {
+      var task = c && c.currentTask;
+      var info = modeInfo(c || {});
+      if (!task) {
+        el.taskLead.textContent = info.key === 'working' ? '任务状态同步中…' : '当前没有正在执行的消费任务。';
+        el.taskStatePill.textContent = info.key === 'paused' ? '已暂停' : (info.key === 'idle' ? '待命中' : (info.key === 'api-only' ? '未启用' : '无任务'));
+        el.taskStatePill.className = ('pill ' + info.tone).trim();
+        el.taskPanel.className = 'task-empty';
+        el.taskPanel.textContent = info.key === 'paused' ? '消费已暂停。恢复后会继续领取新任务。' : '当前没有正在处理的任务。';
+        return;
+      }
+      el.taskLead.textContent = '已领取任务，以下信息会随着状态轮询实时刷新。';
+      el.taskStatePill.textContent = '处理中';
+      el.taskStatePill.className = 'pill good';
+      el.taskPanel.className = '';
+      el.taskPanel.innerHTML = '' +
+        '<div class="task-grid">' +
+          '<div class="task-field"><div class="label">任务 ID</div><div class="value">' + escapeHtml(task.id) + '</div></div>' +
+          '<div class="task-field"><div class="label">开始时间</div><div class="value value-block time">' + escapeHtml(fmtDate(task.startedAt)) + '</div></div>' +
+          '<div class="task-field"><div class="label">SPU ID</div><div class="value">' + escapeHtml(task.spuId == null ? '-' : task.spuId) + '</div></div>' +
+          '<div class="task-field"><div class="label">图片类型</div><div class="value">' + escapeHtml(task.imageType == null ? '-' : task.imageType) + '</div></div>' +
+        '</div>' +
+        '<div class="task-url"><div class="label">图片地址</div><div class="value value-block url">' + escapeHtml(task.imageUrl || '-') + '</div></div>';
+    }
+
+    function appendLogs(items) {
+      var i;
+      if (last === 0) {
+        el.log.textContent = '';
+        el.log.classList.remove('log-placeholder');
+      }
+      for (i = 0; i < items.length; i += 1) {
+        var it = items[i];
+        var level = String(it.level || '');
+        while (level.length < 5) level += ' ';
+        el.log.textContent += '[' + it.ts + '] ' + level + ' ' + it.msg + '\\n';
+        last = it.n;
+        lastLogTs = it.ts || lastLogTs;
+      }
+      hadLogs = true;
+      if (el.followToggle.checked) {
+        el.log.scrollTop = el.log.scrollHeight;
       }
     }
-    setInterval(tick, 1000);
+
+    function xhrJson(method, url, done) {
+      var xhr = new XMLHttpRequest();
+      xhr.open(method, url, true);
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            done(null, JSON.parse(xhr.responseText));
+          } catch (err) {
+            done(err);
+          }
+        } else {
+          done(new Error('http ' + xhr.status));
+        }
+      };
+      xhr.onerror = function () {
+        done(new Error('network_error'));
+      };
+      xhr.send(null);
+    }
+
+    function postAction(path, pendingText, successText) {
+      setActionNote(pendingText, 'soft');
+      el.pauseBtn.disabled = true;
+      el.resumeBtn.disabled = true;
+      xhrJson('POST', path, function (err) {
+        if (err) {
+          setActionNote('操作失败：' + (err && err.message ? err.message : '未知错误'), 'bad');
+          return;
+        }
+        setActionNote(successText, 'good');
+        pollDelay = 200;
+        scheduleNextPoll(0);
+      });
+    }
+
+    el.pauseBtn.onclick = function () {
+      postAction('/api/consumer/pause', '正在发送暂停指令…', '已发送暂停指令，等待状态确认。');
+    };
+    el.resumeBtn.onclick = function () {
+      postAction('/api/consumer/resume', '正在发送恢复指令…', '已发送恢复指令，等待重新开始消费。');
+    };
+
+    function scheduleNextPoll(delay) {
+      if (pollTimer) clearTimeout(pollTimer);
+      pollTimer = setTimeout(tick, delay);
+    }
+
+    function updateState(s) {
+      var c = s.consumer || {};
+      var stats = c.stats || {};
+      var info = modeInfo(c);
+      var backendOk = c.backendOk === undefined ? true : !!c.backendOk;
+      el.uptime.textContent = fmtSec(s.uptimeSeconds || 0);
+      el.imgTotal.textContent = s.metrics.imagesTotal;
+      el.imgOk.textContent = s.metrics.imagesOk;
+      el.imgFail.textContent = s.metrics.imagesFail;
+      el.summaryMode.textContent = info.label;
+      el.summaryBackend.textContent = backendOk ? '正常' : '异常';
+      el.summaryPoll.textContent = String(s.config.taskPollSecs) + 's';
+      el.consumerCompleted.textContent = stats.completed == null ? 0 : stats.completed;
+      el.consumerFailed.textContent = stats.failed == null ? 0 : stats.failed;
+      el.statusMain.className = ('status-main ' + info.tone).trim();
+      el.statusText.textContent = info.label;
+      el.statusDetail.textContent = info.detail;
+      el.consumerBadge.textContent = info.label;
+      el.consumerBadge.className = ('inline-status ' + info.tone).trim();
+      el.net.textContent = backendOk ? '正常' : ('异常：' + (c.lastBackendError || '无法连接后端'));
+      el.backend.innerHTML = '<span class="value-block url">' + escapeHtml(s.config.taskBaseUrl + '（轮询 ' + s.config.taskPollSecs + 's）') + '</span>';
+      el.startedAt.innerHTML = '<span class="value-block time">' + escapeHtml(fmtDate(s.startedAt)) + '</span>';
+      setButtons(c);
+      renderTask(c);
+    }
+
+    function updateLogs(logs) {
+      if (logs.items && logs.items.length) {
+        appendLogs(logs.items);
+      } else if (last === 0) {
+        el.log.textContent = '暂无日志输出。';
+        el.log.classList.add('log-placeholder');
+      }
+
+      if (hadLogs) {
+        el.logMeta.textContent = '日志条目已同步至 #' + last + (lastLogTs ? (' · 最新时间 ' + fmtDate(lastLogTs)) : '');
+      } else {
+        el.logMeta.textContent = '暂无日志输出';
+      }
+    }
+
+    function handleUiError() {
+      el.statusMain.className = 'status-main bad';
+      el.statusText.textContent = '连接失败';
+      el.statusDetail.textContent = '状态或日志加载失败，系统会自动重试。';
+      el.summaryMode.textContent = '连接失败';
+      el.summaryBackend.textContent = '异常';
+      el.logMeta.textContent = '读取失败，准备重试…';
+      if (last === 0) {
+        el.log.textContent = '状态或日志加载失败，稍后自动重试。';
+        el.log.classList.add('log-placeholder');
+      }
+      pollDelay = 1800;
+      scheduleNextPoll(pollDelay);
+    }
+
+    function tick() {
+      xhrJson('GET', '/api/state', function (err, stateData) {
+        if (err) {
+          handleUiError();
+          return;
+        }
+
+        updateState(stateData);
+        xhrJson('GET', '/api/logs?since=' + last, function (logErr, logData) {
+          if (logErr) {
+            handleUiError();
+            return;
+          }
+          updateLogs(logData);
+          pollDelay = 1000;
+          scheduleNextPoll(pollDelay);
+        });
+      });
+    }
+
     tick();
   </script>
 </body>
@@ -955,7 +1539,7 @@ async def ocr(req: OCRRequest) -> OCRResponse:
             return
 
         try:
-            text = await loop.run_in_executor(app.state.executor, ocr_image_bytes, data)
+            text = await _run_ocr_job(app, data)
             # "no text" is a success case (empty string)
             results[i] = OCRResult(url=url, text=text or "")
             app.state.metrics["imagesOk"] += 1
