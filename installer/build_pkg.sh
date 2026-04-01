@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR="/usr/local/paddleocr-url-api"
 IDENTIFIER="com.paddleocr.urlapi"
-VERSION="1.0.14"
+VERSION="1.0.18"
 
 DIST_DIR="$ROOT_DIR/dist"
 BUILD_DIR="$ROOT_DIR/.pkgbuild"
