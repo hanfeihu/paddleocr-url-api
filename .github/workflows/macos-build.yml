@@ -1,21 +1,12 @@
 name: build-macos-pkg
 
-permissions:
-  contents: write
+# macOS pkg 依赖 offline/payload（含 Python 运行时和 wheels），
+# 该目录在 .gitignore 中，因此 CI 无法自动构建。
+# 请在本地执行 bash installer/build_pkg.sh 后，
+# 使用 gh release upload <tag> dist/paddleocr-url-api-*.pkg 上传。
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
-    tags:
-      - "v*"
-    paths:
-      - "app.py"
-      - "requirements.txt"
-      - "run_server.sh"
-      - "offline/payload/**"
-      - "installer/**"
-      - ".github/workflows/macos-build.yml"
 
 jobs:
   build:
@@ -35,9 +26,3 @@ jobs:
         with:
           name: paddleocr-url-api-macos-pkg
           path: dist/paddleocr-url-api-*.pkg
-
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/paddleocr-url-api-*.pkg
