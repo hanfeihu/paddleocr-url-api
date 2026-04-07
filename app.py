@@ -17,6 +17,16 @@ from PIL import Image
 
 
 APP_NAME = "paddleocr-service"
+TASK_ENV_OPTIONS = {
+  "prod": {"label": "正式环境", "baseUrl": "https://dev.tminos.com"},
+  "local": {"label": "本地环境", "baseUrl": "http://localhost:8080"},
+}
+
+DOC_ORI_MODEL_NAME = "PP-LCNet_x1_0_doc_ori"
+DOC_UNWARP_MODEL_NAME = "UVDoc"
+TEXTLINE_ORI_MODEL_NAME = "PP-LCNet_x1_0_textline_ori"
+TEXT_DET_MODEL_NAME = "PP-OCRv5_server_det"
+TEXT_REC_MODEL_NAME = "PP-OCRv5_server_rec"
 
 logger = logging.getLogger(APP_NAME)
 
@@ -111,7 +121,9 @@ SIZE_GATE = int(os.getenv("OCR_SIZE_GATE", "1200"))
 
 # Background task consumer (pulls OCR work from your backend)
 TASK_CONSUMER_ENABLED = os.getenv("OCR_TASK_CONSUMER_ENABLED", "0") == "1"
-TASK_BASE_URL = os.getenv("OCR_TASK_BASE_URL", "https://dev.tminos.com").rstrip("/")
+TASK_BASE_URL = os.getenv(
+  "OCR_TASK_BASE_URL", TASK_ENV_OPTIONS["prod"]["baseUrl"]
+).rstrip("/")
 TASK_CLAIM_PATH = os.getenv("OCR_TASK_CLAIM_PATH", "/api/ocr/tasks/claim")
 TASK_COMPLETE_PATH = os.getenv("OCR_TASK_COMPLETE_PATH", "/api/ocr/tasks/complete")
 TASK_POLL_SECS = float(os.getenv("OCR_TASK_POLL_SECS", "2"))
@@ -129,16 +141,17 @@ def _is_backend_network_error(e: BaseException) -> bool:
     return isinstance(e, (httpx.TimeoutException, httpx.RequestError))
 
 
-async def _wait_backend(app: FastAPI) -> None:
+async def _wait_backend(app: FastAPI, base_url: Optional[str] = None) -> str:
     """Sleep-loop until backend host is reachable."""
 
     while True:
+        current_base_url = _normalize_base_url(base_url or _get_task_base_url(app))
         try:
-            r = await app.state.task_http.get(TASK_BASE_URL)
+            r = await app.state.task_http.get(current_base_url)
             _ = r.status_code
             app.state.consumer_state["backendOk"] = True
             app.state.consumer_state["lastBackendError"] = None
-            return
+            return current_base_url
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -176,7 +189,7 @@ class _Line:
 
 _OCR_FAST = None
 _OCR_ACCURATE = None
-APP_VERSION = "1.0.18"
+APP_VERSION = "1.0.19"
 
 
 class DownloadError(RuntimeError):
@@ -184,6 +197,82 @@ class DownloadError(RuntimeError):
         super().__init__(api_error)
         self.api_error = api_error
         self.completion_text = completion_text
+
+
+def _normalize_base_url(base_url: str) -> str:
+  return (base_url or "").strip().rstrip("/")
+
+
+def _task_env_key_for_base_url(base_url: str) -> str:
+  normalized = _normalize_base_url(base_url)
+  for env_key, item in TASK_ENV_OPTIONS.items():
+    if item["baseUrl"] == normalized:
+      return env_key
+  return "custom"
+
+
+def _task_env_label(env_key: str, base_url: str) -> str:
+  item = TASK_ENV_OPTIONS.get(env_key)
+  if item is not None:
+    return str(item["label"])
+  return f"自定义环境 ({base_url})"
+
+
+def _task_env_options_payload() -> List[Dict[str, str]]:
+  return [
+    {
+      "key": env_key,
+      "label": str(item["label"]),
+      "baseUrl": str(item["baseUrl"]),
+    }
+    for env_key, item in TASK_ENV_OPTIONS.items()
+  ]
+
+
+def _resolve_official_model_dir(model_name: str) -> Optional[str]:
+  cache_home = (os.getenv("PADDLE_PDX_CACHE_HOME") or "").strip()
+  search_roots: List[str] = []
+  if cache_home:
+    search_roots.append(os.path.join(cache_home, "official_models"))
+  search_roots.append(os.path.expanduser("~/.paddlex/official_models"))
+
+  for root in search_roots:
+    candidate = os.path.join(root, model_name)
+    if os.path.isdir(candidate):
+      return candidate
+  return None
+
+
+def _get_task_base_url(app: FastAPI) -> str:
+  return _normalize_base_url(getattr(app.state, "task_base_url", TASK_BASE_URL))
+
+
+def _get_task_env_key(app: FastAPI) -> str:
+  default_key = _task_env_key_for_base_url(TASK_BASE_URL)
+  return str(getattr(app.state, "task_env_key", default_key))
+
+
+def _base_ocr_kwargs() -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {
+        "doc_orientation_classify_model_name": DOC_ORI_MODEL_NAME,
+        "doc_unwarping_model_name": DOC_UNWARP_MODEL_NAME,
+        "text_detection_model_name": TEXT_DET_MODEL_NAME,
+        "text_recognition_model_name": TEXT_REC_MODEL_NAME,
+    }
+
+    model_dir_map = {
+        "doc_orientation_classify_model_dir": _resolve_official_model_dir(
+            DOC_ORI_MODEL_NAME
+        ),
+        "doc_unwarping_model_dir": _resolve_official_model_dir(DOC_UNWARP_MODEL_NAME),
+        "text_detection_model_dir": _resolve_official_model_dir(TEXT_DET_MODEL_NAME),
+        "text_recognition_model_dir": _resolve_official_model_dir(TEXT_REC_MODEL_NAME),
+    }
+    for key, value in model_dir_map.items():
+        if value:
+            kwargs[key] = value
+
+    return kwargs
 
 
 def _init_ocr_models() -> None:
@@ -194,7 +283,7 @@ def _init_ocr_models() -> None:
 
     # Fast-ish config (poster/screenshot friendly)
     _OCR_FAST = PaddleOCR(
-        lang="ch",
+        **_base_ocr_kwargs(),
         use_textline_orientation=False,
         text_det_limit_side_len=1280,
         text_det_box_thresh=0.50,
@@ -203,8 +292,14 @@ def _init_ocr_models() -> None:
     )
 
     # Accurate config (packaging photo / complex background / small text)
+    accurate_kwargs = _base_ocr_kwargs()
+    accurate_kwargs["textline_orientation_model_name"] = TEXTLINE_ORI_MODEL_NAME
+    textline_model_dir = _resolve_official_model_dir(TEXTLINE_ORI_MODEL_NAME)
+    if textline_model_dir:
+        accurate_kwargs["textline_orientation_model_dir"] = textline_model_dir
+
     _OCR_ACCURATE = PaddleOCR(
-        lang="ch",
+        **accurate_kwargs,
         use_textline_orientation=True,
         text_det_limit_side_len=1536,
         text_det_box_thresh=0.45,
@@ -363,9 +458,9 @@ def ocr_image_bytes(image_bytes: bytes) -> str:
     return fast_text
 
 
-async def _task_claim(app: FastAPI) -> Optional[Dict[str, Any]]:
-    await _wait_backend(app)
-    url = f"{TASK_BASE_URL}{TASK_CLAIM_PATH}"
+async def _task_claim(app: FastAPI) -> Tuple[Optional[Dict[str, Any]], str]:
+    base_url = await _wait_backend(app)
+    url = f"{base_url}{TASK_CLAIM_PATH}"
     payload: Optional[Dict[str, Any]] = None
     if TASK_PUBLIC_IP:
         payload = {"publicIp": TASK_PUBLIC_IP}
@@ -378,7 +473,7 @@ async def _task_claim(app: FastAPI) -> Optional[Dict[str, Any]]:
     js = r.json()
     if not js.get("success", False):
         raise RuntimeError(f"claim failed: {js.get('message') or 'unknown'}")
-    return js.get("data")
+    return js.get("data"), base_url
 
 
 async def _task_complete(
@@ -387,9 +482,10 @@ async def _task_complete(
     *,
     ocr_text: Optional[str] = None,
     fail_reason: Optional[str] = None,
+    base_url: Optional[str] = None,
 ) -> None:
-    url = f"{TASK_BASE_URL}{TASK_COMPLETE_PATH}"
-    await _wait_backend(app)
+    resolved_base_url = await _wait_backend(app, base_url)
+    url = f"{resolved_base_url}{TASK_COMPLETE_PATH}"
     if ocr_text is not None:
         cleaned = _sanitize_ocr_text(ocr_text or "")
         if not cleaned.strip():
@@ -431,6 +527,7 @@ async def _task_complete_with_retry(
     *,
     ocr_text: Optional[str] = None,
     fail_reason: Optional[str] = None,
+    base_url: Optional[str] = None,
 ) -> None:
     delay = 2.0
     attempts = 0
@@ -438,7 +535,11 @@ async def _task_complete_with_retry(
     while True:
         try:
             await _task_complete(
-                app, task_id, ocr_text=ocr_text, fail_reason=fail_reason
+                app,
+                task_id,
+                ocr_text=ocr_text,
+                fail_reason=fail_reason,
+                base_url=base_url,
             )
             return
         except asyncio.CancelledError:
@@ -520,7 +621,7 @@ async def _run_ocr_job(app: FastAPI, data: bytes) -> str:
 async def _task_consumer_loop(app: FastAPI) -> None:
     logger.info(
         "task consumer enabled base=%s poll=%.2fs",
-        TASK_BASE_URL,
+    _get_task_base_url(app),
         TASK_POLL_SECS,
     )
 
@@ -532,8 +633,9 @@ async def _task_consumer_loop(app: FastAPI) -> None:
             continue
 
         task: Optional[Dict[str, Any]] = None
+        task_base_url: Optional[str] = None
         try:
-            task = await _task_claim(app)
+            task, task_base_url = await _task_claim(app)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -571,6 +673,11 @@ async def _task_consumer_loop(app: FastAPI) -> None:
             "spuId": spu_id,
             "imageType": image_type,
             "imageUrl": str(image_url),
+            "baseUrl": task_base_url,
+            "envLabel": _task_env_label(
+                _task_env_key_for_base_url(task_base_url or ""),
+                task_base_url or "",
+            ),
             "startedAt": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -581,7 +688,12 @@ async def _task_consumer_loop(app: FastAPI) -> None:
             data = await _download(str(image_url))
             app.state.metrics["imagesTotal"] += 1
             text = await _run_ocr_job(app, data)
-            await _task_complete_with_retry(app, int(task_id), ocr_text=text or "")
+            await _task_complete_with_retry(
+                app,
+                int(task_id),
+                ocr_text=text or "",
+                base_url=task_base_url,
+            )
             app.state.consumer_state["stats"]["completed"] += 1
             app.state.metrics["imagesOk"] += 1
             logger.info("completed taskId=%s text_len=%s", task_id, len(text or ""))
@@ -597,7 +709,10 @@ async def _task_consumer_loop(app: FastAPI) -> None:
                     e,
                 )
                 await _task_complete_with_retry(
-                    app, int(task_id), ocr_text=completion_text
+                    app,
+                    int(task_id),
+                    ocr_text=completion_text,
+                    base_url=task_base_url,
                 )
                 app.state.consumer_state["stats"]["completed"] += 1
                 app.state.metrics["imagesOk"] += 1
@@ -605,7 +720,12 @@ async def _task_consumer_loop(app: FastAPI) -> None:
                 app.state.consumer_state["stats"]["failed"] += 1
                 app.state.metrics["imagesFail"] += 1
                 logger.exception("task failed taskId=%s err=%s", task_id, e)
-                await _task_complete_with_retry(app, int(task_id), fail_reason=str(e))
+                await _task_complete_with_retry(
+                    app,
+                    int(task_id),
+                    fail_reason=str(e),
+                    base_url=task_base_url,
+                )
         finally:
             app.state.consumer_state["idle"] = True
             app.state.consumer_state["currentTask"] = None
@@ -639,6 +759,8 @@ async def lifespan(app: FastAPI):
     await _prewarm_executor(app)
 
     app.state.started_at = datetime.now(timezone.utc)
+    app.state.task_base_url = TASK_BASE_URL
+    app.state.task_env_key = _task_env_key_for_base_url(TASK_BASE_URL)
     app.state.metrics = {
         "imagesTotal": 0,
         "imagesOk": 0,
@@ -677,6 +799,30 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=APP_NAME, lifespan=lifespan)
 
 
+@app.post("/api/config/task-env/{env_key}")
+async def set_task_env(env_key: str) -> JSONResponse:
+  env = TASK_ENV_OPTIONS.get(env_key)
+  if env is None:
+    raise HTTPException(status_code=404, detail="unknown_task_env")
+
+  app.state.task_env_key = env_key
+  app.state.task_base_url = _normalize_base_url(str(env["baseUrl"]))
+  app.state.consumer_state["lastBackendError"] = None
+  logger.info(
+    "task environment switched env=%s base=%s",
+    env_key,
+    app.state.task_base_url,
+  )
+  return JSONResponse(
+    {
+      "ok": True,
+      "envKey": env_key,
+      "label": str(env["label"]),
+      "taskBaseUrl": app.state.task_base_url,
+    }
+  )
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"ok": True, "name": APP_NAME}
@@ -693,7 +839,12 @@ def api_state() -> JSONResponse:
             "metrics": app.state.metrics,
             "consumer": app.state.consumer_state,
             "config": {
-                "taskBaseUrl": TASK_BASE_URL,
+              "taskBaseUrl": _get_task_base_url(app),
+              "taskEnvKey": _get_task_env_key(app),
+              "taskEnvLabel": _task_env_label(
+                _get_task_env_key(app), _get_task_base_url(app)
+              ),
+              "taskEnvOptions": _task_env_options_payload(),
                 "taskPollSecs": TASK_POLL_SECS,
             },
         }
@@ -1131,6 +1282,7 @@ def ui() -> str:
       <div class=\"sub\">Auto-claim tasks, run OCR, auto-complete + live logs · Version __APP_VERSION__</div>
       <div class=\"header-meta\">
         <div class=\"pill\"><strong id=\"summaryMode\">连接中...</strong></div>
+        <div class=\"pill\">环境 <strong id=\"summaryEnv\">-</strong></div>
         <div class=\"pill\">后端 <strong id=\"summaryBackend\">-</strong></div>
         <div class=\"pill\">轮询 <strong id=\"summaryPoll\">-</strong></div>
         <div class=\"pill\">已完成 <strong id=\"consumerCompleted\">0</strong></div>
@@ -1149,6 +1301,8 @@ def ui() -> str:
       <div class=\"hd\">
         <div class=\"t\">运行状态</div>
         <div class=\"btns\">
+          <button id=\"prodEnvBtn\">正式环境</button>
+          <button id=\"localEnvBtn\">本地环境</button>
           <button id=\"pauseBtn\" class=\"btn-warn\">暂停消费</button>
           <button id=\"resumeBtn\" class=\"btn-primary\">恢复消费</button>
           <a class=\"pill muted-link\" href=\"/docs\" target=\"_blank\">接口文档</a>
@@ -1167,6 +1321,7 @@ def ui() -> str:
             <div class=\"grid\">
               <div class=\"row\"><div class=\"k\">消费状态</div><div class=\"v\"><span class=\"inline-status\" id=\"consumerBadge\">-</span></div></div>
               <div class=\"row\"><div class=\"k\">网络状态</div><div class=\"v\" id=\"net\">-</div></div>
+              <div class=\"row\"><div class=\"k\">任务环境</div><div class=\"v\" id=\"taskEnv\">-</div></div>
               <div class=\"row\"><div class=\"k\">后端服务</div><div class=\"v\" id=\"backend\">-</div></div>
               <div class=\"row\"><div class=\"k\">启动时间</div><div class=\"v\" id=\"startedAt\">-</div></div>
             </div>
@@ -1212,6 +1367,7 @@ def ui() -> str:
       statusText: document.getElementById('statusText'),
       statusDetail: document.getElementById('statusDetail'),
       summaryMode: document.getElementById('summaryMode'),
+      summaryEnv: document.getElementById('summaryEnv'),
       summaryBackend: document.getElementById('summaryBackend'),
       summaryPoll: document.getElementById('summaryPoll'),
       consumerCompleted: document.getElementById('consumerCompleted'),
@@ -1222,9 +1378,12 @@ def ui() -> str:
       imgFail: document.getElementById('imgFail'),
       consumerBadge: document.getElementById('consumerBadge'),
       net: document.getElementById('net'),
+      taskEnv: document.getElementById('taskEnv'),
       backend: document.getElementById('backend'),
       startedAt: document.getElementById('startedAt'),
       actionNote: document.getElementById('actionNote'),
+      prodEnvBtn: document.getElementById('prodEnvBtn'),
+      localEnvBtn: document.getElementById('localEnvBtn'),
       pauseBtn: document.getElementById('pauseBtn'),
       resumeBtn: document.getElementById('resumeBtn'),
       taskLead: document.getElementById('taskLead'),
@@ -1290,8 +1449,11 @@ def ui() -> str:
     function setButtons(c) {
       var enabled = !!(c && c.enabled);
       var paused = !!(c && c.paused);
+      var taskCfg = window.__taskConfig || {};
       el.pauseBtn.disabled = !enabled || paused;
       el.resumeBtn.disabled = !enabled || !paused;
+      el.prodEnvBtn.disabled = taskCfg.taskEnvKey === 'prod';
+      el.localEnvBtn.disabled = taskCfg.taskEnvKey === 'local';
     }
 
     function renderTask(c) {
@@ -1381,6 +1543,12 @@ def ui() -> str:
     el.resumeBtn.onclick = function () {
       postAction('/api/consumer/resume', '正在发送恢复指令…', '已发送恢复指令，等待重新开始消费。');
     };
+    el.prodEnvBtn.onclick = function () {
+      postAction('/api/config/task-env/prod', '正在切换到正式环境…', '已切换到正式环境。');
+    };
+    el.localEnvBtn.onclick = function () {
+      postAction('/api/config/task-env/local', '正在切换到本地环境…', '已切换到本地环境。');
+    };
 
     function scheduleNextPoll(delay) {
       if (pollTimer) clearTimeout(pollTimer);
@@ -1389,16 +1557,19 @@ def ui() -> str:
 
     function updateState(s) {
       var c = s.consumer || {};
+      var cfg = s.config || {};
       var stats = c.stats || {};
       var info = modeInfo(c);
       var backendOk = c.backendOk === undefined ? true : !!c.backendOk;
+      window.__taskConfig = cfg;
       el.uptime.textContent = fmtSec(s.uptimeSeconds || 0);
       el.imgTotal.textContent = s.metrics.imagesTotal;
       el.imgOk.textContent = s.metrics.imagesOk;
       el.imgFail.textContent = s.metrics.imagesFail;
       el.summaryMode.textContent = info.label;
+      el.summaryEnv.textContent = cfg.taskEnvLabel || '-';
       el.summaryBackend.textContent = backendOk ? '正常' : '异常';
-      el.summaryPoll.textContent = String(s.config.taskPollSecs) + 's';
+      el.summaryPoll.textContent = String(cfg.taskPollSecs) + 's';
       el.consumerCompleted.textContent = stats.completed == null ? 0 : stats.completed;
       el.consumerFailed.textContent = stats.failed == null ? 0 : stats.failed;
       el.statusMain.className = ('status-main ' + info.tone).trim();
@@ -1407,7 +1578,8 @@ def ui() -> str:
       el.consumerBadge.textContent = info.label;
       el.consumerBadge.className = ('inline-status ' + info.tone).trim();
       el.net.textContent = backendOk ? '正常' : ('异常：' + (c.lastBackendError || '无法连接后端'));
-      el.backend.innerHTML = '<span class="value-block url">' + escapeHtml(s.config.taskBaseUrl + '（轮询 ' + s.config.taskPollSecs + 's）') + '</span>';
+      el.taskEnv.innerHTML = '<span class="value-block">' + escapeHtml((cfg.taskEnvLabel || '-') + ' / ' + (cfg.taskEnvKey || '-')) + '</span>';
+      el.backend.innerHTML = '<span class="value-block url">' + escapeHtml(cfg.taskBaseUrl + '（轮询 ' + cfg.taskPollSecs + 's）') + '</span>';
       el.startedAt.innerHTML = '<span class="value-block time">' + escapeHtml(fmtDate(s.startedAt)) + '</span>';
       setButtons(c);
       renderTask(c);

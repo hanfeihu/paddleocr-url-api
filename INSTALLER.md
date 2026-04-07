@@ -20,10 +20,10 @@ Build the .pkg (on a Mac)
   bash installer/build_pkg.sh
 
 Output
-  dist/paddleocr-url-api-1.0.14.pkg
+  dist/paddleocr-url-api-1.0.19.pkg
 
 Install
-  sudo installer -pkg dist/paddleocr-url-api-1.0.14.pkg -target /
+  sudo installer -pkg dist/paddleocr-url-api-1.0.19.pkg -target /
 
 Verify
   curl -s http://127.0.0.1:8000/health
@@ -41,4 +41,5 @@ Uninstall
 Notes
 - This package does not create a venv or call pip during installation.
 - Models are bundled and PaddleX cache is pinned into the install directory.
+- The `/ui` page supports switching the task base URL between the formal and local environments at runtime.
 - If you prefer the alternate offline install path, see offline/README_OFFLINE.md.

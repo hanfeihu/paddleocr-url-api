@@ -1,13 +1,19 @@
 name: build-macos-pkg
 
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
   push:
     branches: [ "main" ]
+    tags:
+      - "v*"
     paths:
       - "app.py"
       - "requirements.txt"
       - "run_server.sh"
+      - "offline/payload/**"
       - "installer/**"
       - ".github/workflows/macos-build.yml"
 
@@ -28,4 +34,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: paddleocr-url-api-macos-pkg
-          path: dist/paddleocr-url-api-1.0.14.pkg
+          path: dist/paddleocr-url-api-*.pkg
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/paddleocr-url-api-*.pkg
