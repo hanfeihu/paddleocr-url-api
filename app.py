@@ -251,6 +251,30 @@ def _resolve_official_model_dir(model_name: str) -> Optional[str]:
     return None
 
 
+def _resolved_model_dir_map() -> Dict[str, Optional[str]]:
+    return {
+        "doc_orientation_classify_model_dir": _resolve_official_model_dir(
+            DOC_ORI_MODEL_NAME
+        ),
+        "doc_unwarping_model_dir": _resolve_official_model_dir(DOC_UNWARP_MODEL_NAME),
+        "text_detection_model_dir": _resolve_official_model_dir(TEXT_DET_MODEL_NAME),
+        "text_recognition_model_dir": _resolve_official_model_dir(TEXT_REC_MODEL_NAME),
+        "textline_orientation_model_dir": _resolve_official_model_dir(
+            TEXTLINE_ORI_MODEL_NAME
+        ),
+    }
+
+
+def _ocr_runtime_probe() -> Dict[str, Any]:
+    return {
+        "cache_home": (os.getenv("PADDLE_PDX_CACHE_HOME") or "").strip() or None,
+        "disable_model_source_check": os.getenv(
+            "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"
+        ),
+        "resolved_model_dirs": _resolved_model_dir_map(),
+    }
+
+
 def _get_task_base_url(app: FastAPI) -> str:
     return _normalize_base_url(getattr(app.state, "task_base_url", TASK_BASE_URL))
 
@@ -277,15 +301,10 @@ def _base_ocr_kwargs() -> Dict[str, Any]:
         "text_recognition_model_name": TEXT_REC_MODEL_NAME,
     }
 
-    model_dir_map = {
-        "doc_orientation_classify_model_dir": _resolve_official_model_dir(
-            DOC_ORI_MODEL_NAME
-        ),
-        "doc_unwarping_model_dir": _resolve_official_model_dir(DOC_UNWARP_MODEL_NAME),
-        "text_detection_model_dir": _resolve_official_model_dir(TEXT_DET_MODEL_NAME),
-        "text_recognition_model_dir": _resolve_official_model_dir(TEXT_REC_MODEL_NAME),
-    }
+    model_dir_map = _resolved_model_dir_map()
     for key, value in model_dir_map.items():
+        if key == "textline_orientation_model_dir":
+            continue
         if value:
             kwargs[key] = value
 
@@ -626,15 +645,35 @@ def _task_completion_text_for_error(err: BaseException) -> Optional[str]:
 
 
 def _create_ocr_executor() -> ProcessPoolExecutor:
-    return ProcessPoolExecutor(max_workers=OCR_WORKERS, initializer=_init_ocr_models)
+    return ProcessPoolExecutor(max_workers=OCR_WORKERS)
+
+
+def _prewarm_ocr_worker() -> Dict[str, Any]:
+    _init_ocr_models()
+    return {
+        "pid": os.getpid(),
+        "resolved_model_dirs": _resolved_model_dir_map(),
+    }
 
 
 async def _prewarm_executor(app: FastAPI) -> None:
+    probe = _ocr_runtime_probe()
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(app.state.executor, _init_ocr_models)
+        result = await loop.run_in_executor(app.state.executor, _prewarm_ocr_worker)
+        logger.info(
+            "prewarmed ocr worker pid=%s resolved_model_dirs=%s",
+            result.get("pid"),
+            result.get("resolved_model_dirs"),
+        )
     except Exception:
-        logger.exception("failed to prewarm ocr workers")
+        logger.error(
+            "ocr runtime probe cache_home=%s disable_model_source_check=%s resolved_model_dirs=%s",
+            probe.get("cache_home"),
+            probe.get("disable_model_source_check"),
+            probe.get("resolved_model_dirs"),
+        )
+        logger.exception("failed to prewarm ocr worker")
 
 
 async def _run_ocr_job(app: FastAPI, data: bytes) -> str:
@@ -840,6 +879,13 @@ async def lifespan(app: FastAPI):
     app.state.executor_lock = asyncio.Lock()
     app.state.executor_jobs = 0
     app.state.executor_active = 0
+    probe = _ocr_runtime_probe()
+    logger.info(
+        "ocr runtime cache_home=%s disable_model_source_check=%s resolved_model_dirs=%s",
+        probe.get("cache_home"),
+        probe.get("disable_model_source_check"),
+        probe.get("resolved_model_dirs"),
+    )
     app.state.executor = _create_ocr_executor()
     # Best-effort prewarm to avoid first-request latency inside the process pool.
     await _prewarm_executor(app)

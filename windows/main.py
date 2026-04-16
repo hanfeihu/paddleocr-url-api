@@ -8,15 +8,16 @@ from __future__ import annotations
 import multiprocessing
 import os
 
-import uvicorn
-
-# Ensure PyInstaller includes the FastAPI app module.
-import app  # noqa: F401
-
 
 def main() -> None:
-    # Required for multiprocessing when running as a frozen executable.
+    # Divert frozen multiprocessing child processes before importing the
+    # FastAPI app or Uvicorn stack again.
     multiprocessing.freeze_support()
+
+    import uvicorn
+
+    # Ensure PyInstaller includes the FastAPI app module.
+    import app  # noqa: F401
 
     host = os.getenv("OCR_HOST", "0.0.0.0")
     port = int(os.getenv("OCR_PORT", "8000"))

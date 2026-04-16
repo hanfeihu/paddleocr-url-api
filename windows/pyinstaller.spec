@@ -3,25 +3,30 @@
 #   pyinstaller --noconfirm --clean windows/pyinstaller.spec
 
 import os
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+)
 
 
 block_cipher = None
 
 hiddenimports = []
+datas = []
+binaries = []
 
-# Paddle / PaddleOCR have dynamic imports.
-hiddenimports += collect_submodules('paddle')
-hiddenimports += collect_submodules('paddleocr')
-hiddenimports += collect_submodules('paddlex')
+# Paddle / PaddleOCR / PaddleX need hidden imports plus package data and
+# native runtime libraries (configs, fonts, bundled DLLs, etc).
+for package_name in ('paddle', 'paddleocr', 'paddlex'):
+    hiddenimports += collect_submodules(package_name)
+    datas += collect_data_files(package_name)
+    binaries += collect_dynamic_libs(package_name)
 
 # uvicorn/fastapi stack
 hiddenimports += collect_submodules('uvicorn')
 hiddenimports += collect_submodules('fastapi')
 hiddenimports += collect_submodules('starlette')
-
-
-datas = []
 
 # PyInstaller may set SPECPATH to a relative path or just the basename.
 spec_dir = os.path.abspath(os.path.dirname(SPECPATH) or os.getcwd())
@@ -48,7 +53,7 @@ else:
 a = Analysis(
     [os.path.join(windows_dir, 'main.py')],
     pathex=[repo_root, windows_dir],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
