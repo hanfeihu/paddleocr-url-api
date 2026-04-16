@@ -1,11 +1,11 @@
 #define AppName "OCR URL API"
-#define AppVersion "1.0.20"
+#define AppVersion "1.0.21"
 #define AppPublisher "hanfeihu"
 #define AppURL "https://github.com/hanfeihu/paddleocr-url-api"
 #define AppExeName "ocr-url-api.exe"
 #define ServiceInstallScript "install-service.bat"
 #define ServiceUninstallScript "uninstall-service.bat"
-#define OutputBaseName "ocr-url-api-setup-1.0.20"
+#define OutputBaseName "ocr-url-api-setup-1.0.21"
 
 [Setup]
 AppId={{3EDE56D8-8EB4-4127-A97E-A420DD8BE95B}
@@ -26,6 +26,9 @@ WizardStyle=modern
 PrivilegesRequired=admin
 OutputDir=..\dist
 OutputBaseFilename={#OutputBaseName}
+CloseApplications=yes
+RestartApplications=no
+CloseApplicationsFilter=ocr-url-api.exe,ocr-url-api-service.exe
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -42,3 +45,42 @@ Filename: "{app}\{#ServiceInstallScript}"; Flags: runhidden waituntilterminated;
 
 [UninstallRun]
 Filename: "{app}\{#ServiceUninstallScript}"; Flags: runhidden waituntilterminated skipifdoesntexist
+
+[Code]
+procedure ExecIfExists(const FileName: string; const Params: string);
+var
+	ResultCode: Integer;
+begin
+	if FileExists(FileName) then
+		Exec(FileName, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure ExecSystemIfExists(const FileName: string; const Params: string);
+var
+	ResultCode: Integer;
+begin
+	if FileExists(FileName) then
+		Exec(FileName, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure StopExistingService();
+var
+	AppDir: string;
+	ServiceExe: string;
+begin
+	AppDir := ExpandConstant('{app}');
+	ServiceExe := AppDir + '\ocr-url-api-service.exe';
+
+	ExecIfExists(ServiceExe, 'stop');
+	ExecIfExists(ServiceExe, 'uninstall');
+	ExecSystemIfExists(ExpandConstant('{sys}\sc.exe'), 'stop ocr-url-api');
+	ExecSystemIfExists(ExpandConstant('{sys}\sc.exe'), 'delete ocr-url-api');
+	ExecSystemIfExists(ExpandConstant('{sys}\taskkill.exe'), '/F /IM ocr-url-api-service.exe /T');
+	ExecSystemIfExists(ExpandConstant('{sys}\taskkill.exe'), '/F /IM ocr-url-api.exe /T');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+	if CurStep = ssInstall then
+		StopExistingService();
+end;
