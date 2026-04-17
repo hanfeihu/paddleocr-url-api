@@ -20,10 +20,10 @@ Build the .pkg (on a Mac)
   bash installer/build_pkg.sh
 
 Output
-  dist/paddleocr-url-api-1.0.22.pkg
+  dist/paddleocr-url-api-1.0.23.pkg
 
 Install
-  sudo installer -pkg dist/paddleocr-url-api-1.0.22.pkg -target /
+  sudo installer -pkg dist/paddleocr-url-api-1.0.23.pkg -target /
 
 Verify
   curl -s http://127.0.0.1:8000/health

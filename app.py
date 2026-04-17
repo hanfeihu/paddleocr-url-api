@@ -197,7 +197,7 @@ class OCRConfigUpdate(BaseModel):
 
 _OCR_FAST = None
 _OCR_ACCURATE = None
-APP_VERSION = "1.0.22"
+APP_VERSION = "1.0.23"
 
 
 class DownloadError(RuntimeError):
